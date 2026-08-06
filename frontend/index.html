@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rebind — identity outlives the key</title>
+<style>
+  :root{
+    --navy:#0B1739; --panel:#16264F; --panel2:#1D3260;
+    --mint:#3DF5C4; --blue:#5AC8FF; --body:#C7D6EA; --muted:#8195B5; --red:#FF7B7B;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--navy);color:var(--body);font:15px/1.6 ui-sans-serif,system-ui,-apple-system,sans-serif;padding:32px}
+  .wrap{max-width:1180px;margin:0 auto}
+  header{display:flex;align-items:baseline;gap:16px;margin-bottom:6px}
+  h1{font-size:34px;color:#fff;letter-spacing:.5px}
+  .tag{color:var(--mint);font-style:italic;font-size:17px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:26px}
+  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:22px}
+  .card{background:var(--panel);border-radius:12px;padding:18px}
+  .card h3{color:#fff;font-size:15px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center}
+  .addr{font-family:ui-monospace,monospace;font-size:11px;color:var(--muted);word-break:break-all;margin-bottom:8px}
+  .bal{font-size:30px;color:var(--mint);font-weight:600}
+  .bal.zero{color:var(--muted)}
+  .pill{font-size:10px;padding:3px 9px;border-radius:99px;text-transform:uppercase;letter-spacing:.6px;font-weight:600}
+  .ok{background:rgba(61,245,196,.15);color:var(--mint)}
+  .bad{background:rgba(255,123,123,.15);color:var(--red)}
+  .off{background:rgba(129,149,181,.15);color:var(--muted)}
+  .beats{background:var(--panel2);border-radius:12px;padding:20px;margin-bottom:20px}
+  .beat{display:flex;gap:14px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+  .beat:last-child{border:none}
+  .n{width:26px;height:26px;border-radius:50%;background:var(--panel);color:var(--muted);
+     display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex:0 0 26px}
+  .beat.done .n{background:var(--mint);color:var(--navy)}
+  .beat.active .n{background:var(--blue);color:var(--navy)}
+  .beat h4{color:#fff;font-size:14px;font-weight:600}
+  .beat p{font-size:12.5px;color:var(--muted)}
+  button{background:var(--mint);color:var(--navy);border:0;border-radius:8px;padding:9px 15px;
+         font-weight:650;font-size:13px;cursor:pointer;margin:4px 6px 4px 0}
+  button:hover{filter:brightness(1.08)}
+  button:disabled{background:#2A3A5E;color:var(--muted);cursor:not-allowed}
+  button.ghost{background:transparent;border:1px solid var(--blue);color:var(--blue)}
+  button.danger{background:var(--red);color:var(--navy)}
+  #log{background:#060E22;border-radius:12px;padding:16px;font-family:ui-monospace,monospace;
+       font-size:11.5px;height:290px;overflow:auto;white-space:pre-wrap}
+  .l-ok{color:var(--mint)} .l-err{color:var(--red)} .l-info{color:var(--blue)} .l-dim{color:var(--muted)}
+  .timer{font-size:26px;color:var(--blue);font-family:ui-monospace,monospace}
+  a{color:var(--mint)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>REBIND</h1><span class="tag">Identity outlives the key.</span></header>
+  <p class="sub">Recovery infrastructure for compliance-restricted real-world assets · <span id="chain">…</span></p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Alice — wallet A <span id="pA" class="pill off">—</span></h3>
+      <div class="addr" id="aA">…</div>
+      <div class="bal zero" id="bA">0</div>
+    </div>
+    <div class="card">
+      <h3>Alice — wallet B <span id="pB" class="pill off">—</span></h3>
+      <div class="addr" id="aB">…</div>
+      <div class="bal zero" id="bB">0</div>
+    </div>
+    <div class="card">
+      <h3>Attacker <span id="pX" class="pill off">—</span></h3>
+      <div class="addr" id="aX">…</div>
+      <div class="bal zero" id="bX">0</div>
+    </div>
+  </div>
+
+  <div class="beats" id="beats"></div>
+
+  <div class="card" style="margin-bottom:20px">
+    <h3>Challenge window</h3>
+    <div class="timer" id="timer">—</div>
+    <div style="font-size:12px;color:var(--muted);margin-top:4px">
+      The old wallet is frozen when the claim opens while an issuer reviewer assesses it.
+    </div>
+  </div>
+
+  <div id="log"></div>
+</div>
+
+<script>
+const API = "";
+const W = {
+  A: "0xa34118bD1A2A789A962A4471C59c3964fb716123",
+  B: "0x7A0A94615094Ef0673f2D0F031D43fB9ED78cc0B",
+  X: "0x6d11172f538b60BE3a69c745944767Ac94019df7",
+};
+const CID = "ALICEDEMO" + Date.now().toString().slice(-6);
+let claimId = null, lastTx = null, step = 0;
+
+const BEATS = [
+  ["Register Alice & mint the note", "A-Pass created for wallet A, restricted note issued", "register"],
+  ["Attacker attempts theft", "Transfer to an unverified wallet — blocked by the gate", "steal"],
+  ["Alice claims from wallet B", "Backend proves both wallets share one customerId", "claim"],
+  ["Challenge window", "Old wallet is frozen during review", "wait"],
+  ["Issuer approves & executes", "Note moves to B", "execute"],
+  ["Export audit pack", "Cleanverse Travel Rule PDF", "audit"],
+];
+
+function renderBeats(){
+  document.getElementById("beats").innerHTML = BEATS.map(([h,p,act],i)=>`
+    <div class="beat ${i<step?'done':i===step?'active':''}">
+      <div class="n">${i<step?'✓':i+1}</div>
+      <div style="flex:1">
+        <h4>${h}</h4><p>${p}</p>
+        ${i===step?`<button onclick="run('${act}')" id="btn-${act}">Run</button>`:''}
+      </div>
+    </div>`).join("");
+}
+
+function log(msg,cls="l-dim"){
+  const el=document.getElementById("log");
+  el.innerHTML+=`<span class="${cls}">[${new Date().toLocaleTimeString()}] ${msg}</span>\n`;
+  el.scrollTop=el.scrollHeight;
+}
+
+async function post(path,body){
+  const r=await fetch(API+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const j=await r.json();
+  if(!j.ok) throw new Error(j.error||"failed");
+  return j;
+}
+
+async function refresh(){
+  const q=Object.values(W).join(",");
+  const r=await fetch(`${API}/api/state?wallets=${q}`).then(x=>x.json());
+  if(!r.ok) return;
+  document.getElementById("chain").textContent =
+    `chain ${r.contracts.chainId} · token ${r.contracts.token.slice(0,10)}…`;
+  for(const [k,addr] of Object.entries(W)){
+    const s=r.wallets[addr]||{};
+    document.getElementById("a"+k).textContent=addr;
+    const b=document.getElementById("b"+k);
+    b.textContent=parseFloat(s.balance||0).toLocaleString();
+    b.className="bal"+(parseFloat(s.balance||0)>0?"":" zero");
+    const p=document.getElementById("p"+k);
+    if(s.revoked){p.textContent="revoked";p.className="pill bad";}
+    else if(s.active){p.textContent="verified";p.className="pill ok";}
+    else {p.textContent="unverified";p.className="pill off";}
+  }
+}
+
+async function run(action){
+  const btn=document.getElementById("btn-"+action); if(btn) btn.disabled=true;
+  try{
+    if(action==="register"){
+      log("registering A-Pass for wallet A…","l-info");
+      let r=await post("/api/register",{customerId:CID,address:W.A});
+      log(`A-Pass created · cv tx ${r.cleanverse?.wallet?.txHash?.slice(0,18)}…`,"l-ok");
+      r=await post("/api/register",{customerId:CID,address:W.B,override:true});
+      log(`wallet B bound to the SAME customerId · record ${r.cleanverse?.cvRecordId}`,"l-ok");
+      r=await post("/api/mint",{to:W.A,amount:250});
+      log(`minted 250 NOTE to wallet A · ${r.txHash.slice(0,18)}…`,"l-ok");
+      step=1;
+    }
+    else if(action==="steal"){
+      log("attacker attempts transfer A → attacker…","l-info");
+      const r=await post("/api/check",{from:W.A,to:W.X});
+      log(`BLOCKED — on-chain code ${r.onchain.code}: ${r.onchain.reason}`,"l-err");
+      log(`Cleanverse verify_apass: ${r.cleanverse.reason}`,"l-err");
+      log("compliance protected the asset.","l-ok");
+      step=2;
+    }
+    else if(action==="claim"){
+      log("proving identity equivalence via query_apass_list…","l-info");
+      const r=await post("/api/claim",{customerId:CID,oldWallet:W.A,newWallet:W.B});
+      claimId=r.claimId;
+      log(`equivalence: ${r.proof.detail}`,"l-ok");
+      log(`wallets under customerId: ${r.proof.wallets.join(", ")}`,"l-dim");
+      log(`claim #${claimId} opened · ${r.txHash.slice(0,18)}…`,"l-ok");
+      step=3; startTimer();
+    }
+    else if(action==="cancel"){
+      log("incumbent wallet cancelling the claim…","l-info");
+      log("(in the live demo this is signed by wallet A)","l-dim");
+    }
+    else if(action==="wait"){ step=4; }
+    else if(action==="execute"){
+      log("issuer countersigning…","l-info");
+      await post("/api/approve",{claimId});
+      log("revoking old binding (Cleanverse + on-chain)…","l-info");
+      const rv=await post("/api/revoke",{customerId:CID,address:W.A,reason:"recovery: rotated"});
+      log(`old binding revoked · cv ${String(rv.cleanverseTx).slice(0,18)}…`,"l-ok");
+      const r=await post("/api/execute",{claimId});
+      lastTx=r.txHash;
+      log(`RECOVERED · ${r.txHash.slice(0,18)}…`,"l-ok");
+      log(`wallet A: ${r.oldBalance} · wallet B: ${r.newBalance}`,"l-ok");
+      step=5;
+    }
+    else if(action==="audit"){
+      log("requesting Travel Rule report…","l-info");
+      const r=await post("/api/audit",{txHash:lastTx,address:W.B,customerId:CID});
+      if(r.report?.downloadUrl){
+        log(`audit pack ready: ${r.report.fileName}`,"l-ok");
+        window.open(r.report.downloadUrl,"_blank");
+      } else log(`no report: ${r.message}`,"l-err");
+      step=6;
+    }
+  }catch(e){ log("ERROR "+e.message,"l-err"); }
+  if(btn) btn.disabled=false;
+  renderBeats(); refresh();
+}
+
+let timerInt=null;
+function startTimer(){
+  clearInterval(timerInt);
+  timerInt=setInterval(async()=>{
+    if(claimId===null) return;
+    const r=await fetch(`${API}/api/claim/${claimId}`).then(x=>x.json());
+    if(!r.ok) return;
+    const t=r.timeRemaining;
+    document.getElementById("timer").textContent =
+      t>0 ? `${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")}` : "elapsed";
+    if(t===0 && step===3){ step=4; renderBeats(); clearInterval(timerInt); }
+  },1000);
+}
+
+// Wallet addresses are injected at demo time. Replace these with your own.
+fetch(`${API}/api/state?wallets=`).then(r=>r.json()).then(()=>{}).catch(()=>{});
+renderBeats(); refresh(); setInterval(refresh,4000);
+</script>
+</body>
+</html>
