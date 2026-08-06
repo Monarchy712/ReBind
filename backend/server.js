@@ -170,6 +170,18 @@ app.post("/api/approve", async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// ---- 6b. issuer rejects a disputed claim ------------------------------------
+// Deliberately issuer-only, mirroring RecoveryQueue.cancel(). In a stolen-key
+// scenario the old wallet is the attacker, who must not hold a veto over the
+// rightful owner's recovery. Cancelling restores the old binding.
+app.post("/api/cancel", async (req, res) => {
+  try {
+    const tx = await queue.cancel(Number(req.body.claimId));
+    await tx.wait();
+    ok(res, { txHash: tx.hash });
+  } catch (e) { fail(res, e); }
+});
+
 // Legacy UI compatibility. RecoveryQueue freezes the binding atomically at
 // claim opening; calling this endpoint must never perform a second transition.
 app.post("/api/revoke", async (_req, res) => {
