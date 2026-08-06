@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./BindingRegistry.sol";
+import "./IERC1404.sol";
 
 /**
  * @title RebindableRWA
@@ -33,7 +34,7 @@ import "./BindingRegistry.sol";
  * we relax the sender check only, never the recipient check. Recovery is a
  * compliance feature, not a compliance bypass.
  */
-contract RebindableRWA is ERC20, Ownable {
+contract RebindableRWA is ERC20, Ownable, IERC1404 {
     BindingRegistry public immutable registry;
 
     /// The only address permitted to perform recovery transfers.
@@ -126,17 +127,52 @@ contract RebindableRWA is ERC20, Ownable {
         emit RecoveryTransfer(from, to, value);
     }
 
-    /// @notice Read-only pre-flight check, in the spirit of ERC-1404.
-    ///         Lets a UI say WHY a transfer would fail, before signing.
-    function detectTransferRestriction(address from, address to)
+    // ----------------------------------------------------------- ERC-1404
+
+    /// No restriction. ERC-1404 fixes 0 as "allowed"; the rest are ours.
+    uint8 public constant SUCCESS = 0;
+    uint8 public constant SENDER_UNBOUND = 1;
+    uint8 public constant SENDER_REVOKED = 2;
+    uint8 public constant RECIPIENT_UNBOUND = 3;
+    uint8 public constant RECIPIENT_REVOKED = 4;
+    uint8 public constant INSUFFICIENT_BALANCE = 5;
+
+    /**
+     * @notice Would this transfer be permitted right now?
+     * @dev Mirrors the order of checks in `_update`, so a caller that sees
+     *      SUCCESS here and still reverts is a bug worth knowing about.
+     *      Recovery is deliberately not modelled: it is not a transfer any
+     *      caller can initiate, so reporting it as permitted would be a lie.
+     */
+    function detectTransferRestriction(address from, address to, uint256 value)
         external
         view
-        returns (uint8 code, string memory reason)
+        override
+        returns (uint8)
     {
-        if (!registry.isActive(from) && !registry.revoked(from)) return (1, "Sender has no A-Pass binding");
-        if (registry.revoked(from))                return (2, "Sender binding revoked");
-        if (!registry.isActive(to) && !registry.revoked(to)) return (3, "Recipient has no A-Pass binding");
-        if (registry.revoked(to))                  return (4, "Recipient binding revoked");
-        return (0, "Transfer allowed");
+        if (!registry.isActive(from) && !registry.revoked(from)) return SENDER_UNBOUND;
+        if (registry.revoked(from)) return SENDER_REVOKED;
+        if (!registry.isActive(to) && !registry.revoked(to)) return RECIPIENT_UNBOUND;
+        if (registry.revoked(to)) return RECIPIENT_REVOKED;
+        // Checked last: an ineligible counterparty is the more useful thing to
+        // report, and it does not change by topping up the balance.
+        if (balanceOf(from) < value) return INSUFFICIENT_BALANCE;
+        return SUCCESS;
+    }
+
+    /// @notice Human-readable text for a code from `detectTransferRestriction`.
+    function messageForTransferRestriction(uint8 restrictionCode)
+        external
+        pure
+        override
+        returns (string memory)
+    {
+        if (restrictionCode == SUCCESS) return "Transfer allowed";
+        if (restrictionCode == SENDER_UNBOUND) return "Sender has no A-Pass binding";
+        if (restrictionCode == SENDER_REVOKED) return "Sender binding revoked";
+        if (restrictionCode == RECIPIENT_UNBOUND) return "Recipient has no A-Pass binding";
+        if (restrictionCode == RECIPIENT_REVOKED) return "Recipient binding revoked";
+        if (restrictionCode == INSUFFICIENT_BALANCE) return "Insufficient balance";
+        return "Unknown restriction code";
     }
 }

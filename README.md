@@ -52,7 +52,7 @@ yourself. That seam is stated openly rather than papered over.
 
 ```
 BindingRegistry   personId <-> wallets, revocation. Written by the attestor.
-RebindableRWA     ERC-20 with a compliance gate in _update() + recoveryTransfer()
+RebindableRWA     ERC-20 + ERC-1404, compliance gate in _update(), recoveryTransfer()
 RecoveryQueue     EIP-712 claims, cure window, issuer approval
 RebindExecutor    the only address allowed to perform a recovery transfer
 ```
@@ -62,6 +62,39 @@ RebindExecutor    the only address allowed to perform a recovery transfer
 OpenZeppelin v5 routes every balance change — `transfer`, `transferFrom`,
 `_mint`, `_burn` — through one internal `_update()`. Overriding it once covers
 every path with no bypass.
+
+### Asking before you sign — ERC-1404
+
+A gate that only speaks by reverting teaches the rule by costing gas. The token
+implements **ERC-1404**, the standard pre-flight interface, so a caller can ask
+first:
+
+```solidity
+detectTransferRestriction(from, to, value) -> uint8   // 0 = allowed
+messageForTransferRestriction(uint8)       -> string
+```
+
+| Code | Meaning |
+|---|---|
+| 0 | Transfer allowed |
+| 1 | Sender has no A-Pass binding |
+| 2 | Sender binding revoked |
+| 3 | Recipient has no A-Pass binding |
+| 4 | Recipient binding revoked |
+| 5 | Insufficient balance |
+
+Two functions rather than one is deliberate: contracts branch on the cheap
+numeric code, and only a UI pays to render the string.
+
+Eligibility is reported **ahead of** balance — topping up cannot fix an
+ineligible counterparty, so naming the counterparty is the more useful answer.
+A test asserts every non-zero code corresponds to a transfer that really does
+revert; a pre-flight check that disagrees with enforcement is worse than none,
+because callers trust it and lose the gas anyway.
+
+Conforming rather than approximating is what makes this reachable: any
+ERC-1404-aware wallet, exchange or compliance dashboard can query the token
+with no bespoke integration.
 
 ### The recovery trap
 
@@ -118,7 +151,7 @@ Base Sepolia testnet ETH: https://www.alchemy.com/faucets/base-sepolia
 
 ```bash
 npm run compile
-npm test              # 59 tests (31 contract, 28 backend)
+npm test              # 65 tests (37 contract, 28 backend)
 ```
 
 **If `npx hardhat compile` fails with HH502** (can't reach
@@ -214,10 +247,10 @@ This one asks what we owe the people we already verified."*
 ## Layout
 
 ```
-contracts/     BindingRegistry, RebindableRWA, RecoveryQueue, RebindExecutor
-test/          59 tests. rebind.test.js covers every on-chain attack path;
-               backend.test.js covers the AES envelope and attestor refusals
-               (offline — stubs fetch, needs no credentials)
+contracts/     BindingRegistry, RebindableRWA, RecoveryQueue, RebindExecutor, IERC1404
+test/          65 tests. rebind.test.js covers every on-chain attack path and
+               every ERC-1404 code; backend.test.js covers the AES envelope
+               and attestor refusals (offline — stubs fetch, no credentials)
 scripts/       deploy, register-atoken, freeze-scope-test, compile-local
 backend/       cleanverse.js (API+AES), attestor.js (EIP-712), server.js
 frontend/      single-file demo UI
