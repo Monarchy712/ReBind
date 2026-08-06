@@ -1,0 +1,86 @@
+name: CI
+
+# Pull requests are the reason this exists: four contracts enforcing a
+# compliance rule are exactly the kind of code where a plausible-looking
+# refactor silently removes a check. The suite already covers those paths —
+# this makes sure nobody has to remember to run it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A force-push should cancel the run it superseded rather than queue behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: compile & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Solidity compilers are a large download and change only when
+      # hardhat.config.js pins a new version.
+      - name: Cache solc compilers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/hardhat-nodejs
+          key: solc-${{ runner.os }}-${{ hashFiles('hardhat.config.js') }}
+
+      - run: npm ci
+
+      - name: Compile
+        run: npx hardhat compile
+
+      # No secrets are configured for this job, and that is deliberate. The
+      # suite must pass without a .env: the contract tests run against a local
+      # Hardhat chain, and the backend tests stub fetch. If a test ever needs a
+      # real credential it has stopped being a unit test, and CI should say so
+      # by failing here rather than by quietly reaching the shared sandbox —
+      # the api-id is shared between teams.
+      - name: Test
+        run: npx hardhat test
+
+  # Cheap, and catches the mistake that actually costs you: a private key or an
+  # api-key pasted into a file instead of .env.
+  secrets:
+    name: no committed secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail if a .env file is tracked
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error file=.env::.env is committed. It holds private keys — remove it and keep it gitignored."
+            exit 1
+          fi
+          echo "no tracked .env"
+
+      - name: Fail on a private key or Cleanverse credential in tracked files
+        run: |
+          # .env.example is the one place these names may legitimately appear,
+          # because there it is a blank template rather than a value.
+          if git grep -nIE '(DEPLOYER_PK|ATTESTOR_PK)[[:space:]]*=[[:space:]]*(0x)?[0-9a-fA-F]{64}' \
+               -- . ':!.env.example' ':!.github/workflows/ci.yml'; then
+            echo "::error::A private key is committed. Rotate it, then remove it from the repo."
+            exit 1
+          fi
+          if git grep -nIE 'CV_API_(ID|KEY)[[:space:]]*=[[:space:]]*.+' \
+               -- . ':!.env.example' ':!.github/workflows/ci.yml'; then
+            echo "::error::A Cleanverse credential is committed. Move it to .env."
+            exit 1
+          fi
+          echo "no committed credentials"
