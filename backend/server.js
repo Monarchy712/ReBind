@@ -94,8 +94,11 @@ app.post("/api/mint", async (req, res) => {
 // ---- 3. pre-flight check (the blocked-theft beat) ---------------------------
 app.post("/api/check", async (req, res) => {
   try {
-    const { from, to } = req.body;
-    const [code, reason] = await token.detectTransferRestriction(from, to);
+    const { from, to, amount } = req.body;
+    // ERC-1404 is two calls by design: a cheap numeric code, then the text.
+    const value = amount ? ethers.parseUnits(String(amount), 6) : 0n;
+    const code = await token.detectTransferRestriction(from, to, value);
+    const reason = await token.messageForTransferRestriction(code);
     const cvVerdict = await cv.verifyApass({ address: to, atoken: D.token });
     ok(res, { onchain: { code: Number(code), reason }, cleanverse: cvVerdict });
   } catch (e) { fail(res, e); }

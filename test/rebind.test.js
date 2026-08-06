@@ -138,14 +138,71 @@ describe("Rebind", function () {
         .to.be.revertedWithCustomError(token, "RecipientNotEligible");
     });
 
-    it("explains refusals in human terms (ERC-1404 style)", async function () {
-      const [code, reason] = await token.detectTransferRestriction(alice.address, attacker.address);
+    it("explains refusals in human terms (ERC-1404)", async function () {
+      const code = await token.detectTransferRestriction(alice.address, attacker.address, 1n);
       expect(code).to.equal(3);
-      expect(reason).to.equal("Recipient has no A-Pass binding");
+      expect(await token.messageForTransferRestriction(code))
+        .to.equal("Recipient has no A-Pass binding");
 
-      const [ok, msg] = await token.detectTransferRestriction(alice.address, bob.address);
+      // value 0 asks the pure eligibility question, with no balance component.
+      const ok = await token.detectTransferRestriction(alice.address, bob.address, 0n);
       expect(ok).to.equal(0);
-      expect(msg).to.equal("Transfer allowed");
+      expect(await token.messageForTransferRestriction(ok)).to.equal("Transfer allowed");
+    });
+
+    it("reports a revoked sender and a revoked recipient distinctly", async function () {
+      await registry.connect(attestor).revokeWallet(alice.address, "lost");
+      expect(await token.detectTransferRestriction(alice.address, bob.address, 1n)).to.equal(2);
+
+      await registry.connect(attestor).revokeWallet(bob.address, "lost");
+      expect(await token.detectTransferRestriction(aliceNew.address, bob.address, 1n)).to.equal(4);
+    });
+
+    it("reports an unbound sender", async function () {
+      expect(await token.detectTransferRestriction(attacker.address, bob.address, 1n)).to.equal(1);
+    });
+
+    it("uses the value argument: flags a balance it could not cover", async function () {
+      await token.connect(admin).mint(alice.address, 100n);
+      expect(await token.detectTransferRestriction(alice.address, bob.address, 100n)).to.equal(0);
+      expect(await token.detectTransferRestriction(alice.address, bob.address, 101n)).to.equal(5);
+    });
+
+    it("reports eligibility problems ahead of balance problems", async function () {
+      // Both are wrong, but topping up the balance would not fix the transfer.
+      // Naming the counterparty is the more useful answer.
+      expect(await token.detectTransferRestriction(alice.address, attacker.address, 999n)).to.equal(3);
+    });
+
+    it("agrees with the gate: every non-zero code corresponds to a real revert", async function () {
+      // A pre-flight check that disagrees with enforcement is worse than none,
+      // because callers trust it and lose gas anyway.
+      await token.connect(admin).mint(alice.address, 500n);
+      const cases = [
+        [alice, attacker, 100n],   // recipient unbound
+        [attacker, bob, 100n],     // sender unbound
+        [alice, bob, 100000n],     // insufficient balance
+      ];
+      for (const [from, to, value] of cases) {
+        const code = await token.detectTransferRestriction(from.address, to.address, value);
+        expect(code, "expected a restriction").to.not.equal(0);
+        await expect(token.connect(from).transfer(to.address, value)).to.be.reverted;
+      }
+
+      // And the converse: a clean code really does go through.
+      expect(await token.detectTransferRestriction(alice.address, bob.address, 100n)).to.equal(0);
+      await expect(token.connect(alice).transfer(bob.address, 100n)).to.not.be.reverted;
+    });
+
+    it("names every code it can return, and admits when it cannot", async function () {
+      const expected = [
+        "Transfer allowed", "Sender has no A-Pass binding", "Sender binding revoked",
+        "Recipient has no A-Pass binding", "Recipient binding revoked", "Insufficient balance",
+      ];
+      for (let i = 0; i < expected.length; i++) {
+        expect(await token.messageForTransferRestriction(i)).to.equal(expected[i]);
+      }
+      expect(await token.messageForTransferRestriction(99)).to.equal("Unknown restriction code");
     });
   });
 
