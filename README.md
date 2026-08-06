@@ -109,7 +109,7 @@ Base Sepolia testnet ETH: https://www.alchemy.com/faucets/base-sepolia
 
 ```bash
 npm run compile
-npm test              # 31 tests
+npm test              # 59 tests (31 contract, 28 backend)
 ```
 
 **If `npx hardhat compile` fails with HH502** (can't reach
@@ -205,7 +205,9 @@ This one asks what we owe the people we already verified."*
 
 ```
 contracts/     BindingRegistry, RebindableRWA, RecoveryQueue, RebindExecutor
-test/          31 tests incl. every attack path
+test/          59 tests. rebind.test.js covers every on-chain attack path;
+               backend.test.js covers the AES envelope and attestor refusals
+               (offline — stubs fetch, needs no credentials)
 scripts/       deploy, register-atoken, freeze-scope-test, compile-local
 backend/       cleanverse.js (API+AES), attestor.js (EIP-712), server.js
 frontend/      single-file demo UI
