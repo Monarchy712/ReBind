@@ -98,7 +98,7 @@ const BEATS = [
   ["Register Alice & mint the note", "A-Pass created for wallet A, restricted note issued", "register"],
   ["Attacker attempts theft", "Transfer to an unverified wallet — blocked by the gate", "steal"],
   ["Alice claims from wallet B", "Backend proves both wallets share one customerId", "claim"],
-  ["Challenge window", "Old wallet is frozen during review", "wait"],
+  ["Challenge window", "Old wallet frozen on claim; issuer may reject during review", "wait"],
   ["Issuer approves & executes", "Note moves to B", "execute"],
   ["Export audit pack", "Cleanverse Travel Rule PDF", "audit"],
 ];
@@ -177,10 +177,17 @@ async function run(action){
       step=3; startTimer();
     }
     else if(action==="cancel"){
-      log("incumbent wallet cancelling the claim…","l-info");
-      log("(in the live demo this is signed by wallet A)","l-dim");
+      log("issuer rejecting the claim…","l-info");
+      await post("/api/cancel",{claimId});
+      log("claim cancelled · old binding restored","l-ok");
+      await refresh();
     }
-    else if(action==="wait"){ step=4; }
+    else if(action==="wait"){
+      log("old wallet frozen the moment the claim opened — a stolen key cannot drain it","l-info");
+      log("during review only an issuer reviewer may reject (POST /api/cancel)","l-dim");
+      log("the old wallet deliberately has no veto: in a theft it is the attacker","l-dim");
+      step=4;
+    }
     else if(action==="execute"){
       log("issuer countersigning…","l-info");
       await post("/api/approve",{claimId});

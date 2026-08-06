@@ -77,11 +77,20 @@ sender is revoked`.
 1. **Attestation** — opening a claim needs an EIP-712 signature from the
    attestor, who only signs after `query_apass_list` confirms both wallets share
    one `customerId`. A stolen *wallet* is not a stolen *identity*.
-2. **Cure window** — the claim sits publicly; the incumbent wallet cancels
-   instantly. This is the transfer agent's notice period, on-chain.
-3. **Issuer approval** — a human countersigns.
+2. **Cure window** — opening a claim immediately freezes the old binding, so a
+   compromised key cannot drain the asset while the claim is reviewed. This is
+   the transfer agent's notice period, on-chain.
+3. **Issuer approval** — a human countersigns, and may reject during the window.
 
 Defeating all three needs the wallet *and* the identity *and* the issuer.
+
+**Who may cancel — and why it is not the old wallet.** `cancel()` is
+`onlyRole(ISSUER_ROLE)`. Giving the incumbent wallet a veto looks protective
+until you name who holds that key in the scenario we exist for: in a theft it is
+the attacker, and in a genuine loss nobody holds it at all. A thief cannot move
+the asset — the gate already stops them — so a veto would be their *only*
+remaining power, purely to grief the rightful owner. Rejection therefore sits
+with the issuer, who restores the old binding on cancel.
 
 ---
 
@@ -130,11 +139,12 @@ Determines whether `update_status` freezes a **wallet** or a whole
 **customerId**. Rebind's step 5 revokes the old binding — that only works if
 freeze is per-wallet.
 
-- **PASS** → ship as designed.
-- **FAIL** → in `backend/server.js` `/api/revoke`, drop the `cv.updateStatus`
-  call and rely on `registry.revokeWallet()` alone. The contracts already
-  support this. Say so on stage; a documented platform limitation reads as
-  rigour.
+- **PASS** → set `CV_FREEZE_PER_WALLET=true` in `.env` and ship as designed.
+- **FAIL** → leave `CV_FREEZE_PER_WALLET=false`. `/api/claim` then skips the
+  `cv.updateStatus` mirror and relies on the on-chain freeze alone, which
+  `RecoveryQueue.openClaim()` performs atomically via `revokeForRecovery()`.
+  The contracts already support this. Say so on stage; a documented platform
+  limitation reads as rigour.
 
 ### 5. Deploy
 
@@ -171,7 +181,7 @@ Put three wallet addresses into the `W` object at the top of the script block in
 | 1 | Register & mint | A-Pass for wallet A, 250 NOTE issued |
 | 2 | **Attacker attempts theft** | **Reverts.** `RecipientNotEligible` |
 | 3 | Alice claims from wallet B | Same `customerId` proven, claim opened |
-| 4 | Cure window | Countdown; wallet A could cancel |
+| 4 | Cure window | Countdown; wallet A already frozen, issuer may reject |
 | 5 | Approve & execute | Note lands in B, old binding revoked |
 | 6 | Audit pack | Real Cleanverse Travel Rule PDF |
 
