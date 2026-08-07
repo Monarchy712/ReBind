@@ -4,3 +4,4 @@ artifacts/
 cache/
 deployments.json
 *.log
+rebind-handbook.pdf

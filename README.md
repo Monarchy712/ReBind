@@ -151,7 +151,7 @@ Base Sepolia testnet ETH: https://www.alchemy.com/faucets/base-sepolia
 
 ```bash
 npm run compile
-npm test              # 65 tests (37 contract, 28 backend)
+npm test              # 81 tests (37 contract, 28 backend, 16 local stub)
 ```
 
 **If `npx hardhat compile` fails with HH502** (can't reach
@@ -161,6 +161,40 @@ npm test              # 65 tests (37 contract, 28 backend)
 npm run compile:offline    # compiles via the solc npm package
 npm run test:offline       # hardhat test --no-compile
 ```
+
+### 3b. Run the whole demo locally (no testnet, no credentials)
+
+The steps below need Base Sepolia ETH, Cleanverse API keys, and a
+`register_atoken` approval that has a human in the loop and can take hours.
+None of that is worth waiting on when you only want to see the flow — or work
+on the UI. Local mode runs every beat against a Hardhat node with an in-memory
+Cleanverse stub:
+
+```bash
+npm run node:local     # terminal 1 — local chain, leave it running
+npm run fund:local     # terminal 2 — funds your .env keys, starts the block heartbeat
+npm run deploy:local   #            — writes deployments.json
+npm run server:local   #            — http://localhost:3000
+```
+
+You still need `DEPLOYER_PK`, `ATTESTOR_PK` and `IDENTITY_COMMITMENT_SALT` in
+`.env` — any values will do, since the chain is disposable. `CV_API_ID` and
+`CV_API_KEY` are not read at all.
+
+Three things worth knowing:
+
+- **`fund:local` turns on interval mining.** A Hardhat node only advances
+  `block.timestamp` when it mines, and it mines only on a transaction. The
+  challenge window is read through a view call, so without a 1s heartbeat the
+  countdown sits frozen and the recovery never becomes executable.
+- **The stub is shape-compatible, not behaviour-compatible.** It reproduces the
+  response shapes callers destructure, not Cleanverse's quirks (every response
+  being HTTP 200, frozen passes surfacing as code `0002`). Those are what
+  `backend/cleanverse.js` exists to absorb — see `test/cleanverse-local.test.js`.
+- **`npm run server:local` sets `DEMO_MODE=local` inline**, which needs a POSIX
+  shell. On Windows use `set DEMO_MODE=local && node backend/server.js`.
+
+To reset, restart the node and re-run `fund:local` / `deploy:local`.
 
 ### 4. Answer the open question first
 
@@ -251,8 +285,9 @@ contracts/     BindingRegistry, RebindableRWA, RecoveryQueue, RebindExecutor, IE
 test/          65 tests. rebind.test.js covers every on-chain attack path and
                every ERC-1404 code; backend.test.js covers the AES envelope
                and attestor refusals (offline — stubs fetch, no credentials)
-scripts/       deploy, register-atoken, freeze-scope-test, compile-local
+scripts/       deploy, register-atoken, freeze-scope-test, compile-local, fund-local
 backend/       cleanverse.js (API+AES), attestor.js (EIP-712), server.js
+               cleanverse-local.js (offline stub), cleanverse-client.js (mode switch)
 frontend/      single-file demo UI
 ```
 # ReBind

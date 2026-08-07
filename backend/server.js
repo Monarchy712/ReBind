@@ -13,7 +13,8 @@ const cors = require("cors");
 const path = require("path");
 const { ethers } = require("ethers");
 
-const cv = require("./cleanverse");
+const cv = require("./cleanverse-client");
+const LOCAL_MODE = process.env.DEMO_MODE === "local";
 const { Attestor, personIdOf } = require("./attestor");
 const normalizePrivateKey = (value) => value && (value.startsWith("0x") ? value : `0x${value}`);
 
@@ -24,7 +25,12 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "frontend")));
 
-const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+// In local mode the contracts live on the Hardhat node, not on RPC_URL — which
+// still holds the testnet endpoint so switching modes needs no .env edit.
+// cacheTimeout: -1 disables ethers' response cache; the UI polls claim state
+// right after writing it, and a cached read makes the countdown appear stuck.
+const RPC_URL = LOCAL_MODE ? (process.env.LOCAL_RPC || "http://127.0.0.1:8545") : process.env.RPC_URL;
+const provider = new ethers.JsonRpcProvider(RPC_URL, undefined, { cacheTimeout: -1 });
 const issuer = new ethers.Wallet(normalizePrivateKey(process.env.DEPLOYER_PK), provider);
 const attestorWallet = new ethers.Wallet(normalizePrivateKey(process.env.ATTESTOR_PK), provider);
 
@@ -44,7 +50,8 @@ let attestor;
     chainId: Number(net.chainId),
   });
   console.log(`Rebind backend`);
-  console.log(`  chain    ${net.chainId}`);
+  console.log(`  mode     ${LOCAL_MODE ? "LOCAL (in-memory Cleanverse stub)" : "live (Cleanverse API)"}`);
+  console.log(`  chain    ${net.chainId} @ ${RPC_URL}`);
   console.log(`  token    ${D.token}`);
   console.log(`  attestor ${attestor.address}`);
 })();

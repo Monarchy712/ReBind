@@ -21,7 +21,7 @@
  */
 const { ethers } = require("ethers");
 const crypto = require("crypto");
-const cv = require("./cleanverse");
+const cv = require("./cleanverse-client");
 const normalizePrivateKey = (value) => value && (value.startsWith("0x") ? value : `0x${value}`);
 
 const EIP712_TYPES = {
