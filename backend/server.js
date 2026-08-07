@@ -2,7 +2,7 @@
  * Rebind demo backend.
  *
  * Runs the whole flow end to end:
- *   register -> mint -> blocked theft -> claim -> cure -> approve -> execute -> audit
+ *   register -> mint -> blocked theft -> claim -> cure -> approve -> execute
  *
  * Start:  node backend/server.js
  * Needs:  .env  (copy from .env.example)
@@ -212,15 +212,6 @@ app.post("/api/execute", async (req, res) => {
       newBalance: (await token.balanceOf(c.newWallet)).toString(),
       oldBalance: (await token.balanceOf(c.oldWallet)).toString(),
     });
-  } catch (e) { fail(res, e); }
-});
-
-// ---- 9. audit pack ----------------------------------------------------------
-app.post("/api/audit", async (req, res) => {
-  try {
-    const { txHash, address, customerId } = req.body;
-    const report = await cv.travelRuleReport({ txHash, address, customerId });
-    ok(res, { report: report.data, code: report.code, message: report.message });
   } catch (e) { fail(res, e); }
 });
 

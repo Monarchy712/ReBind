@@ -34,6 +34,27 @@ async function main() {
   console.log("token    ", D.token);
   console.log("signing  ", JSON.stringify(message));
 
+  // Preflight: confirm LOCALLY that our signer is the on-chain owner() and that
+  // the contract is visible on this RPC. This separates "my setup is wrong"
+  // from "Cleanverse hasn't indexed the freshly deployed token yet".
+  if (process.env.RPC_URL) {
+    try {
+      const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+      const onchainOwner = await new ethers.Contract(
+        D.token, ["function owner() view returns (address)"], provider
+      ).owner();
+      if (onchainOwner.toLowerCase() !== owner.address.toLowerCase()) {
+        console.error(`\nSTOP: signer ${owner.address} is NOT the token owner() ${onchainOwner}.`);
+        console.error("Redeploy with this DEPLOYER_PK, or set DEPLOYER_PK to the deployer's key.");
+        process.exitCode = 1; return;
+      }
+      console.log("owner()  ", onchainOwner, "(matches signer)");
+    } catch (e) {
+      console.warn(`\nWARN: could not read owner() from ${process.env.RPC_URL}: ${e.shortMessage || e.message}`);
+      console.warn("If the token was just deployed, give the RPC a minute to index it, then retry.\n");
+    }
+  }
+
   const owner_signature = await owner.signMessage(message); // EIP-191
 
   const res = await cv.call("/atoken/register_atoken", {
@@ -46,14 +67,17 @@ async function main() {
   console.log("\nresponse:", JSON.stringify(res, null, 2));
 
   if (String(res.code) !== "0000") {
+    console.error(`\nFAILED — Cleanverse code ${res.code}: ${res.message}`);
     console.error(`
-FAILED. Common causes:
-  - "chain signature invalid" : the signer is not the contract's owner(),
-    or the message was built wrong. It must be lowercase chain + lowercase
-    address with NO separator and NO 0x-stripping.
-  - 403 : AES encryption problem, not auth.
+Interpreting this:
+  - Mentions signature/owner? The preflight above already confirmed
+    signer == owner(), so Cleanverse most likely hasn't indexed the freshly
+    deployed token yet. Wait ~1-2 min and re-run this command.
+  - "already applied / pending"? A prior run already submitted this token.
+    Do NOT re-register; poll status with the requestId it returned.
+  - A true 403 (AES) would have thrown earlier, so this is not that.
 `);
-    process.exit(1);
+    process.exitCode = 1; return;
   }
 
   const requestId = res.data.requestId;
@@ -72,4 +96,6 @@ FAILED. Common causes:
   console.log("\nStill pending. Re-run query_apply_status later, or check the Member platform.");
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+// Avoid process.exit() so pending sockets/timers close cleanly. A hard exit
+// mid-teardown is what triggers the Windows libuv assertion (async.c:76).
+main().catch((e) => { console.error(e); process.exitCode = 1; });

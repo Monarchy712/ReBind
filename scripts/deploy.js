@@ -9,7 +9,9 @@ require("dotenv").config();
 const fs = require("fs");
 const { ethers } = require("hardhat");
 
-const CURE_WINDOW = Number(process.env.CURE_WINDOW || 300); // 5 min for demos
+// 30s for a snappy live demo. Production would use 24h+ (86400) to give a human
+// reviewer time to reject a fraudulent claim before the window elapses.
+const CURE_WINDOW = Number(process.env.CURE_WINDOW || 30);
 const privateKey = (value) => value && (value.startsWith("0x") ? value : `0x${value}`);
 
 async function main() {
@@ -37,15 +39,23 @@ async function main() {
   await registry.waitForDeployment();
   console.log("BindingRegistry ", await registry.getAddress());
 
+  // Cleanverse enforces unique token symbols across registrations (error 12002:
+  // "the same token symbol already exists"). Append a short unique suffix each
+  // deploy so re-tests never collide. Set TOKEN_SYMBOL_UNIQUE=false to opt out.
+  const uniq = Date.now().toString(36).slice(-4).toUpperCase();
+  const tokenName = process.env.TOKEN_NAME || "Series A Note";
+  const baseSymbol = process.env.TOKEN_SYMBOL || "NOTE";
+  const tokenSymbol = process.env.TOKEN_SYMBOL_UNIQUE === "false" ? baseSymbol : `${baseSymbol}${uniq}`;
+
   const token = await (await ethers.getContractFactory("RebindableRWA")).deploy(
-    process.env.TOKEN_NAME || "Series A Note",
-    process.env.TOKEN_SYMBOL || "NOTE",
+    tokenName,
+    tokenSymbol,
     6,
     await registry.getAddress(),
     deployer.address
   );
   await token.waitForDeployment();
-  console.log("RebindableRWA   ", await token.getAddress());
+  console.log("RebindableRWA   ", await token.getAddress(), `(symbol ${tokenSymbol})`);
 
   const queue = await (await ethers.getContractFactory("RecoveryQueue")).deploy(
     await registry.getAddress(), attestorAddr, deployer.address, CURE_WINDOW

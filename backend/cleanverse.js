@@ -162,15 +162,6 @@ async function tokenList(chain = CHAIN) {
   return call("/query_deposit_atoken_list", { chain });
 }
 
-/** txHash -> a real downloadable PDF. This is your audit pack. */
-async function travelRuleReport({ txHash, address, chain = CHAIN, customerId }) {
-  return call("/download_travel_rule", {
-    ...(customerId ? { customerId } : {}),
-    txHash,
-    wallet: { chain, address },
-  });
-}
-
 async function faucet({ symbol = "usdc", depositAddress, amount = "1", chain = CHAIN }) {
   return call("/faucet", { chain, symbol, depositAddress, amount });
 }
@@ -178,6 +169,6 @@ async function faucet({ symbol = "usdc", depositAddress, amount = "1", chain = C
 module.exports = {
   call, encrypt, CHAIN, normaliseAddress,
   generateApass, updateStatus, queryApass, queryApassList, walletsForCustomer,
-  verifyApass, tokenList, travelRuleReport, faucet,
+  verifyApass, tokenList, faucet,
   VERIFY_CODES,
 };
