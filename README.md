@@ -236,8 +236,14 @@ and calls `register_atoken`, then polls until `ISSUED`.
 npm run server         # http://localhost:3000
 ```
 
-Put three wallet addresses into the `W` object at the top of the script block in
-`frontend/index.html` (Alice A, Alice B, attacker).
+The three demo wallets (Alice A, Alice B, attacker) are served by
+`GET /api/config`. To use your own, set `DEMO_WALLET_A`, `DEMO_WALLET_B` and
+`DEMO_WALLET_X` in `.env` — no need to edit the frontend.
+
+Reloading the page resumes from chain state rather than starting over, so a
+refresh mid-demo will not double-mint or lose your place. The two beats that
+leave no on-chain trace — the blocked transfer, which is a read-only preflight,
+and "key compromised", which is narration — replay from the last provable step.
 
 ---
 

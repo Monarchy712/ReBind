@@ -222,6 +222,28 @@ app.post("/api/execute", async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// ---- demo config for the UI -------------------------------------------------
+// The three demo wallets used to live in a `W` object the frontend expected you
+// to hand-edit, which the README had to document as a setup step. They are
+// configuration, so they come from the environment and the UI just asks.
+const DEMO_WALLETS = {
+  A: process.env.DEMO_WALLET_A || "0xa34118bD1A2A789A962A4471C59c3964fb716123",
+  B: process.env.DEMO_WALLET_B || "0x7A0A94615094Ef0673f2D0F031D43fB9ED78cc0B",
+  X: process.env.DEMO_WALLET_X || "0x6d11172f538b60BE3a69c745944767Ac94019df7",
+};
+
+app.get("/api/config", (_req, res) => {
+  ok(res, {
+    wallets: DEMO_WALLETS,
+    // The UI used to hardcode "30 seconds" in its copy, which silently lied
+    // whenever CURE_WINDOW differed. Serve the deployed value instead.
+    cureWindow: D.cureWindow,
+    chainId: D.chainId,
+    token: D.token,
+    localMode: LOCAL_MODE,
+  });
+});
+
 // ---- state for the UI -------------------------------------------------------
 app.get("/api/state", async (req, res) => {
   try {
