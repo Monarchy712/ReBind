@@ -63,8 +63,55 @@ async function main() {
   await queue.waitForDeployment();
   console.log("RecoveryQueue   ", await queue.getAddress());
 
+  // ---- bridge advance stack ------------------------------------------------
+  // Lets a claimant borrow against a committed claim while the cure window
+  // runs. Set BRIDGE_ADVANCE=false to deploy without it; the executor then
+  // takes address(0) for the vault and behaves exactly as it did before.
+  const wantBridge = process.env.BRIDGE_ADVANCE !== "false";
+  const LTV_BPS = Number(process.env.ADVANCE_LTV_BPS || 8000);
+  const FEE_BPS = Number(process.env.ADVANCE_FEE_BPS || 50);
+
+  let stable = null, oracle = null, vault = null;
+  let stableAddr = ethers.ZeroAddress, vaultAddr = ethers.ZeroAddress;
+
+  if (wantBridge) {
+    // On a network with a real stablecoin, point STABLE_ADDRESS at it and the
+    // demo token is never deployed.
+    if (process.env.STABLE_ADDRESS) {
+      stableAddr = process.env.STABLE_ADDRESS;
+      stable = await ethers.getContractAt("DemoStablecoin", stableAddr);
+      console.log("Stablecoin      ", stableAddr, "(existing)");
+    } else {
+      stable = await (await ethers.getContractFactory("DemoStablecoin"))
+        .deploy("Demo USD", "dUSDC", 6, deployer.address);
+      await stable.waitForDeployment();
+      stableAddr = await stable.getAddress();
+      console.log("DemoStablecoin  ", stableAddr);
+    }
+
+    const noteDecimals = Number(await token.decimals());
+    const stableDecimals = Number(await stable.decimals());
+    oracle = await (await ethers.getContractFactory("ParAdvanceOracle"))
+      .deploy(noteDecimals, stableDecimals);
+    await oracle.waitForDeployment();
+    console.log("ParAdvanceOracle", await oracle.getAddress(), `(${noteDecimals}/${stableDecimals} decimals, par)`);
+
+    vault = await (await ethers.getContractFactory("BridgeAdvanceVault")).deploy(
+      await queue.getAddress(),
+      await token.getAddress(),
+      stableAddr,
+      await oracle.getAddress(),
+      deployer.address,
+      LTV_BPS,
+      FEE_BPS
+    );
+    await vault.waitForDeployment();
+    vaultAddr = await vault.getAddress();
+    console.log("BridgeAdvance   ", vaultAddr, `(LTV ${LTV_BPS / 100}%, fee ${FEE_BPS / 100}%)`);
+  }
+
   const executor = await (await ethers.getContractFactory("RebindExecutor")).deploy(
-    await queue.getAddress(), await token.getAddress(), await registry.getAddress()
+    await queue.getAddress(), await token.getAddress(), await registry.getAddress(), vaultAddr
   );
   await executor.waitForDeployment();
   console.log("RebindExecutor  ", await executor.getAddress());
@@ -73,6 +120,37 @@ async function main() {
   await (await token.setExecutor(await executor.getAddress())).wait();
   await (await queue.setExecutor(await executor.getAddress())).wait();
   await (await registry.grantRole(await registry.RECOVERY_ROLE(), await queue.getAddress())).wait();
+
+  if (vault) {
+    await (await vault.setExecutor(await executor.getAddress())).wait();
+
+    // The note is transfer-restricted, so the vault cannot RECEIVE repayment
+    // unless it is itself a bound, active wallet. It is an institution rather
+    // than a person, so it gets its own commitment rather than sharing a
+    // customer's. The deployer holds admin on the registry and takes the
+    // attestor role just long enough to write this one binding.
+    const attestorRole = await registry.ATTESTOR_ROLE();
+    const hadRole = await registry.hasRole(attestorRole, deployer.address);
+    if (!hadRole) {
+      await (await registry.grantRole(attestorRole, deployer.address)).wait();
+    }
+    const institutionId = ethers.keccak256(ethers.toUtf8Bytes("REBIND_BRIDGE_VAULT_INSTITUTION"));
+    await (await registry.bindWallet(institutionId, vaultAddr)).wait();
+    if (!hadRole) {
+      await (await registry.renounceRole(attestorRole, deployer.address)).wait();
+    }
+    console.log("  vault bound as an institutional wallet");
+
+    // Seed lending liquidity so the demo can actually draw.
+    const seed = process.env.ADVANCE_SEED || "100000";
+    const seedUnits = ethers.parseUnits(seed, await stable.decimals());
+    if (!process.env.STABLE_ADDRESS) {
+      await (await stable.mint(deployer.address, seedUnits)).wait();
+    }
+    await (await stable.approve(vaultAddr, seedUnits)).wait();
+    await (await vault.depositLiquidity(seedUnits)).wait();
+    console.log(`  vault seeded with ${seed} dUSDC`);
+  }
   console.log("done.");
 
   const out = {
@@ -82,6 +160,11 @@ async function main() {
     token: await token.getAddress(),
     queue: await queue.getAddress(),
     executor: await executor.getAddress(),
+    stable: stableAddr === ethers.ZeroAddress ? null : stableAddr,
+    oracle: oracle ? await oracle.getAddress() : null,
+    vault: vaultAddr === ethers.ZeroAddress ? null : vaultAddr,
+    advanceLtvBps: vault ? LTV_BPS : null,
+    advanceFeeBps: vault ? FEE_BPS : null,
     attestor: attestorAddr,
     issuer: deployer.address,
     cureWindow: CURE_WINDOW,

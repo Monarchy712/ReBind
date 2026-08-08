@@ -39,6 +39,13 @@ const registry = new ethers.Contract(D.registry, abi("BindingRegistry"), attesto
 const token = new ethers.Contract(D.token, abi("RebindableRWA"), issuer);
 const queue = new ethers.Contract(D.queue, abi("RecoveryQueue"), issuer);
 const executor = new ethers.Contract(D.executor, abi("RebindExecutor"), issuer);
+
+// Bridge advances are optional: a deployment without a vault simply has no
+// advance endpoints, and every other route behaves identically.
+const vault = D.vault ? new ethers.Contract(D.vault, abi("BridgeAdvanceVault"), issuer) : null;
+const stable = D.stable ? new ethers.Contract(D.stable, abi("DemoStablecoin"), issuer) : null;
+const noAdvances = (res) =>
+  res.status(404).json({ ok: false, error: "This deployment has no bridge advance vault." });
 const mirrorFreezeToCleanverse = process.env.CV_FREEZE_PER_WALLET === "true";
 
 let attestor;
@@ -57,9 +64,35 @@ let attestor;
 })();
 
 const ok = (res, data) => res.json({ ok: true, ...data });
+
+/**
+ * Custom errors are the whole point of this codebase's revert strategy, but
+ * ethers cannot name one it has no ABI for — it reports "unknown custom error"
+ * plus a selector, which is what the UI would otherwise show a user. Decode
+ * against every contract we know so a refusal explains itself.
+ */
+const ERROR_ABIS = ["RecoveryQueue", "RebindableRWA", "BindingRegistry", "RebindExecutor", "BridgeAdvanceVault"]
+  .map((n) => { try { return new ethers.Interface(abi(n)); } catch { return null; } })
+  .filter(Boolean);
+
+function decodeRevert(e) {
+  const data = e?.data ?? e?.info?.error?.data ?? e?.error?.data;
+  if (typeof data !== "string" || data.length < 10) return null;
+  for (const iface of ERROR_ABIS) {
+    try {
+      const parsed = iface.parseError(data);
+      if (!parsed) continue;
+      const args = parsed.args.map((a) => a.toString()).join(", ");
+      return args ? `${parsed.name}(${args})` : `${parsed.name}()`;
+    } catch { /* not this contract's error */ }
+  }
+  return null;
+}
+
 const fail = (res, e) => {
   console.error(e);
-  res.status(400).json({ ok: false, error: e.message, proof: e.proof });
+  const decoded = decodeRevert(e);
+  res.status(400).json({ ok: false, error: decoded || e.shortMessage || e.message, proof: e.proof });
 };
 
 // ---- 1. register a person + wallet -----------------------------------------
@@ -198,6 +231,74 @@ app.post("/api/revoke", async (_req, res) => {
   ok(res, { onchainAlreadyFrozen: true, cleanverseTx: null });
 });
 
+// ---- 6c. issuer commits, waiving its own right to cancel --------------------
+// The precondition for lending. Until this is called, "approved" is revocable
+// and a pending claim is not collateral.
+app.post("/api/commit", async (req, res) => {
+  try {
+    const tx = await queue.commit(Number(req.body.claimId));
+    await tx.wait();
+    ok(res, { txHash: tx.hash });
+  } catch (e) { fail(res, e); }
+});
+
+// ---- 6d. bridge advance -----------------------------------------------------
+app.get("/api/advance/:id", async (req, res) => {
+  try {
+    if (!vault) return noAdvances(res);
+    const id = Number(req.params.id);
+
+    const [principalStable, dueNote] = await vault.quote(id);
+    const a = await vault.getAdvance(id);
+    const stableDecimals = Number(await stable.decimals());
+
+    ok(res, {
+      committed: await queue.isCommitted(id),
+      quote: {
+        principalStable: ethers.formatUnits(principalStable, stableDecimals),
+        dueNote: ethers.formatUnits(dueNote, 6),
+      },
+      advance: {
+        drawn: a.drawn,
+        repaid: a.repaid,
+        borrower: a.borrower,
+        principalStable: ethers.formatUnits(a.principalStable, stableDecimals),
+        dueNote: ethers.formatUnits(a.dueNote, 6),
+      },
+      liquidity: ethers.formatUnits(await vault.availableLiquidity(), stableDecimals),
+      canDraw: borrowerSigner() !== null,
+    });
+  } catch (e) { fail(res, e); }
+});
+
+app.post("/api/advance/draw", async (req, res) => {
+  try {
+    if (!vault) return noAdvances(res);
+
+    // Deliberately not signed by the issuer key. The vault only accepts a draw
+    // from the claim's own new wallet, so that nobody can saddle a claimant
+    // with a loan and its fee without consent.
+    const signer = borrowerSigner();
+    if (!signer) {
+      throw new Error(
+        "No borrower key available. The advance must be drawn by the claim's new wallet — " +
+        "set DEMO_BORROWER_PK, or run the local demo where the wallets are disposable."
+      );
+    }
+
+    const id = Number(req.body.claimId);
+    const tx = await vault.connect(signer).draw(id);
+    await tx.wait();
+
+    const stableDecimals = Number(await stable.decimals());
+    ok(res, {
+      txHash: tx.hash,
+      received: ethers.formatUnits(await stable.balanceOf(signer.address), stableDecimals),
+      dueNote: ethers.formatUnits((await vault.getAdvance(id)).dueNote, 6),
+    });
+  } catch (e) { fail(res, e); }
+});
+
 // ---- 7. execute the recovery ------------------------------------------------
 app.post("/api/execute", async (req, res) => {
   try {
@@ -210,6 +311,20 @@ app.post("/api/execute", async (req, res) => {
       const remaining = Number(await queue.timeRemaining(id));
       throw new Error(`Challenge window is still active. Wait ${remaining} more second(s).`);
     }
+    // Read the split before executing; afterwards the advance is settled and
+    // repaymentDue() is 0, so the UI would have nothing to report.
+    let split = null;
+    if (vault) {
+      const [total, toVault, toWallet] = await executor.previewSplit(id);
+      if (toVault > 0n) {
+        split = {
+          total: ethers.formatUnits(total, 6),
+          toVault: ethers.formatUnits(toVault, 6),
+          toWallet: ethers.formatUnits(toWallet, 6),
+        };
+      }
+    }
+
     const tx = await executor.execute(id);
     const rcpt = await tx.wait();
     const c = await queue.getClaim(id);
@@ -218,6 +333,7 @@ app.post("/api/execute", async (req, res) => {
       block: rcpt.blockNumber,
       newBalance: (await token.balanceOf(c.newWallet)).toString(),
       oldBalance: (await token.balanceOf(c.oldWallet)).toString(),
+      split,
     });
   } catch (e) { fail(res, e); }
 });
@@ -226,11 +342,40 @@ app.post("/api/execute", async (req, res) => {
 // The three demo wallets used to live in a `W` object the frontend expected you
 // to hand-edit, which the README had to document as a setup step. They are
 // configuration, so they come from the environment and the UI just asks.
+/**
+ * Drawing a bridge advance must be signed by the borrower — the vault only
+ * accepts draw() from the claim's own new wallet, so nobody can push an
+ * unwanted loan (and its fee) onto someone else.
+ *
+ * That means the demo needs a wallet B it can actually sign for. In local mode
+ * the three demo wallets are therefore derived from the Hardhat node's own
+ * mnemonic, which makes them pre-funded and disposable. On a real network the
+ * addresses stay configuration and the borrower signs from their own wallet.
+ */
+const HARDHAT_MNEMONIC = "test test test test test test test test test test test junk";
+const demoAccount = (i) =>
+  ethers.HDNodeWallet.fromPhrase(HARDHAT_MNEMONIC, undefined, `m/44'/60'/0'/0/${i}`);
+
+const localDemoWallets = LOCAL_MODE
+  ? { A: demoAccount(5), B: demoAccount(6), X: demoAccount(7) }
+  : null;
+
 const DEMO_WALLETS = {
-  A: process.env.DEMO_WALLET_A || "0xa34118bD1A2A789A962A4471C59c3964fb716123",
-  B: process.env.DEMO_WALLET_B || "0x7A0A94615094Ef0673f2D0F031D43fB9ED78cc0B",
-  X: process.env.DEMO_WALLET_X || "0x6d11172f538b60BE3a69c745944767Ac94019df7",
+  A: process.env.DEMO_WALLET_A || localDemoWallets?.A.address || "0xa34118bD1A2A789A962A4471C59c3964fb716123",
+  B: process.env.DEMO_WALLET_B || localDemoWallets?.B.address || "0x7A0A94615094Ef0673f2D0F031D43fB9ED78cc0B",
+  X: process.env.DEMO_WALLET_X || localDemoWallets?.X.address || "0x6d11172f538b60BE3a69c745944767Ac94019df7",
 };
+
+/** The signer that can draw an advance, or null if we hold no borrower key. */
+function borrowerSigner() {
+  if (process.env.DEMO_BORROWER_PK) {
+    return new ethers.Wallet(normalizePrivateKey(process.env.DEMO_BORROWER_PK), provider);
+  }
+  if (localDemoWallets && DEMO_WALLETS.B === localDemoWallets.B.address) {
+    return localDemoWallets.B.connect(provider);
+  }
+  return null;
+}
 
 app.get("/api/config", (_req, res) => {
   ok(res, {
@@ -241,6 +386,15 @@ app.get("/api/config", (_req, res) => {
     chainId: D.chainId,
     token: D.token,
     localMode: LOCAL_MODE,
+    advance: vault
+      ? {
+          enabled: true,
+          vault: D.vault,
+          ltvBps: D.advanceLtvBps,
+          feeBps: D.advanceFeeBps,
+          stableSymbol: "dUSDC",
+        }
+      : { enabled: false },
   });
 });
 
@@ -255,6 +409,9 @@ app.get("/api/state", async (req, res) => {
         balance: ethers.formatUnits(await token.balanceOf(w), 6),
         revoked: await registry.revoked(w),
         active: await registry.isActive(w),
+        stable: stable
+          ? ethers.formatUnits(await stable.balanceOf(w), Number(await stable.decimals()))
+          : null,
       };
     }
     ok(res, { wallets: out, contracts: D, claimCount: Number(await queue.claimCount()) });

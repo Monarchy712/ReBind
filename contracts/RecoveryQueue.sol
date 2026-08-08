@@ -63,6 +63,17 @@ contract RecoveryQueue is EIP712, AccessControl {
         bool cancelled;
         bool executed;
         bool issuerApproved;
+        /**
+         * The issuer has waived its right to cancel. Set only by commit().
+         *
+         * Approval alone is revocable — cancel() works right up until execution
+         * — so "approved" is not a promise that a claim will settle. Anything
+         * that extends credit against a pending claim (see BridgeAdvanceVault)
+         * needs a state that cannot be walked back, or the issuer can approve,
+         * let a lender disburse, and then cancel, leaving the lender with an
+         * unsecured loss and no recourse.
+         */
+        bool committed;
     }
 
     Claim[] private _claims;
@@ -79,6 +90,7 @@ contract RecoveryQueue is EIP712, AccessControl {
     );
     event ClaimCancelled(uint256 indexed claimId, address by);
     event ClaimApproved(uint256 indexed claimId, address issuer);
+    event ClaimCommitted(uint256 indexed claimId, address issuer);
     event ClaimExecuted(uint256 indexed claimId);
     event AttestorChanged(address indexed attestor);
     event CureWindowChanged(uint64 seconds_);
@@ -91,6 +103,7 @@ contract RecoveryQueue is EIP712, AccessControl {
     error ClaimClosed();
     error CureWindowActive(uint64 executableAt);
     error NotApproved();
+    error ClaimIsCommitted(uint256 claimId);
     error NoSuchClaim(uint256 claimId);
     error ZeroAddress();
 
@@ -171,7 +184,8 @@ contract RecoveryQueue is EIP712, AccessControl {
                 executableAt: execAt,
                 cancelled: false,
                 executed: false,
-                issuerApproved: false
+                issuerApproved: false,
+                committed: false
             })
         );
         claimId = _claims.length - 1;
@@ -189,6 +203,10 @@ contract RecoveryQueue is EIP712, AccessControl {
     function cancel(uint256 claimId) external onlyRole(ISSUER_ROLE) {
         Claim storage c = _get(claimId);
         if (c.cancelled || c.executed) revert ClaimClosed();
+        // Committing is a one-way door, and this is the door. Third parties are
+        // permitted to extend credit against a committed claim precisely
+        // because this call can no longer take it away.
+        if (c.committed) revert ClaimIsCommitted(claimId);
 
         c.cancelled = true;
         registry.restoreAfterChallenge(c.oldWallet);
@@ -201,6 +219,37 @@ contract RecoveryQueue is EIP712, AccessControl {
 
         c.issuerApproved = true;
         emit ClaimApproved(claimId, msg.sender);
+    }
+
+    /**
+     * @notice Approve a claim AND permanently give up the right to cancel it.
+     *
+     * @dev This is the strongest statement the issuer can make: after this call
+     *      the claim will settle once the cure window elapses, and no party —
+     *      including the issuer — can stop it. That irrevocability is what lets
+     *      a lender advance funds against the pending claim.
+     *
+     *      It is deliberately a separate call from approve(). An issuer that is
+     *      merely satisfied should approve; an issuer willing to underwrite the
+     *      claim so its owner can borrow against it should commit. The cure
+     *      window still runs, so committing early does not accelerate anything;
+     *      it only removes the issuer's own veto.
+     *
+     *      The honest cost: a fraudulent claim that is committed by mistake can
+     *      no longer be rejected. Commitment should follow the same review that
+     *      approval does, not precede it.
+     */
+    function commit(uint256 claimId) external onlyRole(ISSUER_ROLE) {
+        Claim storage c = _get(claimId);
+        if (c.cancelled || c.executed) revert ClaimClosed();
+        if (c.committed) revert ClaimIsCommitted(claimId);
+
+        if (!c.issuerApproved) {
+            c.issuerApproved = true;
+            emit ClaimApproved(claimId, msg.sender);
+        }
+        c.committed = true;
+        emit ClaimCommitted(claimId, msg.sender);
     }
 
     function markExecuted(uint256 claimId) external {
@@ -223,6 +272,17 @@ contract RecoveryQueue is EIP712, AccessControl {
             && !c.executed
             && c.issuerApproved
             && block.timestamp >= c.executableAt;
+    }
+
+    /**
+     * @notice True when this claim is guaranteed to settle: committed, still
+     *         open, and therefore no longer cancellable by anyone.
+     * @dev The single question a lender needs answered before disbursing.
+     */
+    function isCommitted(uint256 claimId) external view returns (bool) {
+        if (claimId >= _claims.length) return false;
+        Claim storage c = _claims[claimId];
+        return c.committed && !c.cancelled && !c.executed;
     }
 
     function getClaim(uint256 claimId) external view returns (Claim memory) {
