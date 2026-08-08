@@ -372,8 +372,9 @@
   <section class="band">
     <div class="sectionhead"><span class="num">01</span><h2>The demo</h2></div>
     <p class="sectionsub">
-      Six beats against a live chain. Alice holds a restricted note, an attacker is refused,
-      her key is lost, and she recovers into a second wallet she already had verified.
+      Run against a live chain. Alice holds a restricted note, an attacker is refused, her key
+      is lost, and she recovers into a second wallet she already had verified — borrowing
+      against the claim while the window runs, if a vault is deployed.
     </p>
 
     <div class="offline" id="offline" role="alert">
@@ -492,9 +493,12 @@ const API="";
    carried that as a setup step, and the "30 seconds" in the copy below silently
    lied whenever CURE_WINDOW was set to anything else. */
 let W={}, cureWindow=null, CID=null;
+/* Bridge advance config from /api/config, and the last state read for the
+   current claim. Both stay inert when no vault is deployed. */
+let advance={enabled:false}, adv=null;
 
 let claimId=null,lastTx=null,step=0,rejected=false,recovered=false,windowElapsed=false,
-    timerInt=null,totalWindow=null;
+    timerInt=null,totalWindow=null,lastSplit=null;
 
 /* The customerId must survive a reload. A resumed session opens its claim
    against the identity wallets A and B were registered under; a fresh id would
@@ -518,15 +522,27 @@ function fmtWindow(s){
   return `${+(s/3600).toFixed(1)} hours`;
 }
 
-/* beats: linear until the branch at step 4 (review) */
-const BEATS=[
-  "Register & issue",
-  "Theft blocked",
-  "Key compromised",
-  "Recovery claim",
-  "Issuer review",
-  "Resolved",
-];
+/* Beats are named rather than positional. The bridge advance adds one only
+   when a vault is deployed, and doing index arithmetic against a flow whose
+   length varies is how off-by-one bugs get written. */
+const BEAT_TITLES={
+  register:"Register & issue",
+  steal:"Theft blocked",
+  compromise:"Key compromised",
+  claim:"Recovery claim",
+  review:"Issuer review",
+  advance:"Bridge advance",
+  done:"Resolved",
+};
+let BEATS=["register","steal","compromise","claim","review","done"];
+function buildBeats(){
+  BEATS = advance.enabled
+    ? ["register","steal","compromise","claim","review","advance","done"]
+    : ["register","steal","compromise","claim","review","done"];
+}
+const beat=()=>BEATS[step];
+const goTo=(id)=>{ const i=BEATS.indexOf(id); if(i>=0) step=i; };
+const atOrPast=(id)=>step>=BEATS.indexOf(id);
 
 /* ---------- helpers ---------- */
 function log(msg,cls="l-dim"){
@@ -590,50 +606,68 @@ function units(v){
 function pad2(n){return String(n).padStart(2,"0");}
 
 function renderRail(){
-  document.getElementById("rail").innerHTML=BEATS.map((title,i)=>`
+  document.getElementById("rail").style.gridTemplateColumns=`repeat(${BEATS.length},1fr)`;
+  document.getElementById("rail").innerHTML=BEATS.map((id,i)=>`
     <div class="rstep ${i<step?'done':i===step?'active':''}">
       <span class="rnum">${pad2(i+1)}</span>
-      <div class="rlabel">${title}</div>
+      <div class="rlabel">${BEAT_TITLES[id]}</div>
     </div>`).join("");
 }
 
-/* ---------- stage renderer (drives the whole flow) ---------- */
-function renderStage(){
-  const s=document.getElementById("stage");
-  document.getElementById("cardA").classList.toggle("compromised", step>=2 && !recovered);
-
-  if(step===0){
-    s.innerHTML=view("Register Alice, then issue the asset",
-      "Wallet A receives an A-Pass under Alice's Cleanverse customerId and is issued 250 units of a compliance-restricted note. Wallet B is registered to the <em>same</em> customerId — that shared identity is what makes recovery possible later.",
-      `<button onclick="run('register')">Register and mint 250 NOTE</button>`);
-  }
-  else if(step===1){
-    s.innerHTML=view("An attacker tries to move the asset",
-      "Someone attempts to transfer the note from wallet A to an unverified wallet. The token's own compliance gate checks the destination's A-Pass and refuses. The asset is protected before recovery enters the picture at all.",
-      `<button class="danger" onclick="run('steal')">Attempt transfer to attacker</button>`);
-  }
-  else if(step===2){
-    s.innerHTML=view("Alice's key is lost",
-      "The private key for wallet A is gone — lost, phished, or leaked. In an ordinary system the asset is now stranded, or drained. Alice still controls her <strong>identity</strong> at Cleanverse and a second verified wallet, and that is all Rebind needs. <em>Nothing is frozen yet:</em> the asset locks in the next step, the instant a claim opens.",
-      `<button class="ghost" onclick="run('compromise')">Mark the key compromised</button>`);
-  }
-  else if(step===3){
-    s.innerHTML=view("Alice opens a recovery claim from wallet B",
-      "The attestor asks Cleanverse whether A and B share one customerId. They do, so it signs an EIP-712 attestation and opens a claim. The moment that claim opens, <strong>wallet A freezes</strong> — a stolen key cannot move the asset while the claim is under review.",
-      `<button onclick="run('claim')">Prove identity and open a claim</button>`);
-  }
-  else if(step===4){
-    // BRANCH
-    s.innerHTML=`
-      <h2>Issuer review</h2>
-      <p class="lead">Wallet A is frozen and the claim is now scrutinised. Two outcomes — and the property that matters: the issuer can <em>reject</em> a claim or <em>approve</em> one, but can never <em>manufacture</em> one, because the identity evidence comes from Cleanverse.</p>
+/** The countdown ring, shared by the review and advance beats. */
+function ringMarkup(){
+  return `
       <div class="ring">
         <svg width="76" height="76" viewBox="0 0 76 76" aria-hidden="true">
           <circle class="track" cx="38" cy="38" r="36"></circle>
           <circle class="prog" id="ringP" cx="38" cy="38" r="36" stroke-dasharray="226.2" stroke-dashoffset="0"></circle>
         </svg>
         <div class="ringtxt"><div class="t" id="timer">—</div><div class="s" id="timerLbl">challenge window</div></div>
-      </div>
+      </div>`;
+}
+
+/* ---------- stage renderer (drives the whole flow) ---------- */
+function renderStage(){
+  const s=document.getElementById("stage");
+  document.getElementById("cardA").classList.toggle("compromised", atOrPast("compromise") && !recovered);
+  const id=beat();
+
+  if(id==="register"){
+    s.innerHTML=view("Register Alice, then issue the asset",
+      "Wallet A receives an A-Pass under Alice's Cleanverse customerId and is issued 250 units of a compliance-restricted note. Wallet B is registered to the <em>same</em> customerId — that shared identity is what makes recovery possible later.",
+      `<button onclick="run('register')">Register and mint 250 NOTE</button>`);
+  }
+  else if(id==="steal"){
+    s.innerHTML=view("An attacker tries to move the asset",
+      "Someone attempts to transfer the note from wallet A to an unverified wallet. The token's own compliance gate checks the destination's A-Pass and refuses. The asset is protected before recovery enters the picture at all.",
+      `<button class="danger" onclick="run('steal')">Attempt transfer to attacker</button>`);
+  }
+  else if(id==="compromise"){
+    s.innerHTML=view("Alice's key is lost",
+      "The private key for wallet A is gone — lost, phished, or leaked. In an ordinary system the asset is now stranded, or drained. Alice still controls her <strong>identity</strong> at Cleanverse and a second verified wallet, and that is all Rebind needs. <em>Nothing is frozen yet:</em> the asset locks in the next step, the instant a claim opens.",
+      `<button class="ghost" onclick="run('compromise')">Mark the key compromised</button>`);
+  }
+  else if(id==="claim"){
+    s.innerHTML=view("Alice opens a recovery claim from wallet B",
+      "The attestor asks Cleanverse whether A and B share one customerId. They do, so it signs an EIP-712 attestation and opens a claim. The moment that claim opens, <strong>wallet A freezes</strong> — a stolen key cannot move the asset while the claim is under review.",
+      `<button onclick="run('claim')">Prove identity and open a claim</button>`);
+  }
+  else if(id==="review"){
+    // BRANCH
+    const genuineAction = rejected
+      ? `<button class="ghost" onclick="run('reopen')">Open a genuine claim</button>`
+      : advance.enabled
+        // Committing is the stronger statement, and the one that unlocks
+        // borrowing: it approves the claim AND gives up the right to cancel it.
+        ? `<button onclick="run('commit')">Underwrite: approve and waive cancellation</button>
+           <div class="hint">Irrevocable. After this the claim will settle, and even the issuer cannot stop it.</div>`
+        : `<button id="execBtn" onclick="run('approve')" disabled>Approve and recover A → B</button>
+           <div class="hint" id="execHint">Unlocks when the challenge window ends.</div>`;
+
+    s.innerHTML=`
+      <h2>Issuer review</h2>
+      <p class="lead">Wallet A is frozen and the claim is now scrutinised. Two outcomes — and the property that matters: the issuer can <em>reject</em> a claim or <em>approve</em> one, but can never <em>manufacture</em> one, because the identity evidence comes from Cleanverse.</p>
+      ${ringMarkup()}
       <p class="hint" style="margin:0 0 6px">Window is ${fmtWindow(cureWindow)} as deployed. In production this would be 24 hours or more, so a human reviewer has time to catch a fraudulent claim before it becomes executable.</p>
       <div class="branch">
         <div class="lane fraud ${rejected?'dim':''}" id="laneFraud">
@@ -647,22 +681,67 @@ function renderStage(){
           <h4>Genuine recovery</h4>
           <p>${rejected
               ? "Want the other path? Open a fresh, genuine claim — B still shares Alice's identity, and A is active again."
-              : "It really is Alice. Once the challenge window elapses, the issuer approves and the executor moves the asset from A to B."}</p>
-          ${rejected
-            ? `<button class="ghost" onclick="run('reopen')">Open a genuine claim</button>`
-            : `<button id="execBtn" onclick="run('approve')" disabled>Approve and recover A → B</button>
-               <div class="hint" id="execHint">Unlocks when the challenge window ends.</div>`}
+              : advance.enabled
+                ? "It really is Alice. The issuer underwrites the claim, which is what makes it something a lender can safely advance against."
+                : "It really is Alice. Once the challenge window elapses, the issuer approves and the executor moves the asset from A to B."}</p>
+          ${genuineAction}
         </div>
       </div>`;
     if(!rejected) startTimer();
   }
-  else if(step===5){
+  else if(id==="advance"){
+    const q=adv?.quote, drawn=adv?.advance?.drawn;
+    const ltv=(advance.ltvBps||0)/100, fee=(advance.feeBps||0)/100;
+
+    s.innerHTML=`
+      <h2>${drawn?"Advance drawn — the wait costs her nothing":"Alice needs her money before the window ends"}</h2>
+      <p class="lead">${drawn
+        ? `Alice holds <strong>${q?.principalStable??"—"} ${advance.stableSymbol}</strong> now, against an asset she still cannot touch. When the claim settles, the vault takes <strong>${adv?.advance?.dueNote??"—"} NOTE</strong> straight out of the recovery and she keeps the rest. She never has to remember to repay, and never gets the chance not to.`
+        : `The freeze protects the asset and strands the owner equally — over a 48-hour window that is the difference between "my recovery is proceeding" and "I cannot make rent". She is not poor, she is illiquid against a receivable that is about to settle. Because the issuer has now <em>committed</em>, that receivable is something a lender can price.`}</p>
+      ${ringMarkup()}
+      <div class="branch">
+        <div class="lane legit">
+          <h4>${drawn?"Outstanding advance":"Available now"}</h4>
+          <p>
+            Claim value <strong>${adv?.claimNote??"—"} NOTE</strong> ·
+            advance at ${ltv}% LTV <strong>${q?.principalStable??"—"} ${advance.stableSymbol}</strong> ·
+            repaid at settlement <strong>${(drawn?adv?.advance?.dueNote:q?.dueNote)??"—"} NOTE</strong>
+            (${fee}% fee). The ${100-ltv}% gap is the vault's safety margin.
+          </p>
+          ${drawn
+            ? `<div class="hint">Drawn. Repayment is intercepted during execution, not requested afterwards.</div>`
+            : `<button onclick="run('drawAdvance')">Draw ${q?.principalStable??""} ${advance.stableSymbol}</button>
+               <div class="hint">Signed by wallet B and relayed — the borrower never needs gas.</div>`}
+        </div>
+        <div class="lane fraud">
+          <h4>Settle the recovery</h4>
+          <p>Once the window elapses the executor moves the balance, splitting it between the vault and wallet B in a single transaction.</p>
+          <button id="execBtn" onclick="run('approve')" disabled>Recover A → B</button>
+          <div class="hint" id="execHint">Unlocks when the challenge window ends.</div>
+        </div>
+      </div>`;
+    startTimer();
+  }
+  else if(id==="done"){
     const moved = recovered;
+    const split = lastSplit;
     s.innerHTML=`
       <h2>${moved?"Recovered":"Claim rejected — the asset is safe"}</h2>
       <p class="lead">${moved
-        ? "The challenge window elapsed, the issuer approved, and the executor moved the full balance out of the frozen wallet A into wallet B. Same owner, new key — and the issuer could only approve what Cleanverse's records already backed."
+        ? "The challenge window elapsed, the issuer approved, and the executor moved the balance out of the frozen wallet A into wallet B. Same owner, new key — and the issuer could only approve what Cleanverse's records already backed."
         : "The claim was rejected during review and wallet A was restored. Nothing moved. Freezing before reviewing means a bad claim costs the attacker everything and the victim nothing."}</p>
+      ${moved && split ? `
+      <div class="branch">
+        <div class="lane legit">
+          <h4>Settled in one transaction</h4>
+          <p>
+            Recovered <strong>${split.total} NOTE</strong> ·
+            to the vault <strong>${split.toVault} NOTE</strong> ·
+            to wallet B <strong>${split.toWallet} NOTE</strong>.
+          </p>
+          <div class="hint">Alice had already spent the advance. The loan repaid itself out of the recovery, with no repayment step she could miss or refuse.</div>
+        </div>
+      </div>` : ""}
       <p class="hint">Reloading resumes this finished run rather than restarting it: bindings are deliberately immutable, so wallet A cannot be re-registered. A fresh run needs a redeploy — <code>npm run deploy:local</code>, then restart the server.</p>`;
   }
   renderRail();
@@ -688,7 +767,7 @@ async function run(action){
       log(`wallet B bound to the SAME customerId${r.cleanverse?.cvRecordId?` · record ${r.cleanverse.cvRecordId}`:""}`,"l-ok");
       r=await post("/api/mint",{to:W.A,amount:250});
       log(`minted 250 NOTE to wallet A · ${short(r.txHash)}`,"l-ok");
-      step=1;
+      goTo("steal");
     }
     else if(action==="steal"){
       log("attacker attempts transfer  A → attacker…","l-info");
@@ -696,12 +775,12 @@ async function run(action){
       log(`BLOCKED — on-chain code ${r.onchain.code}: ${r.onchain.reason}`,"l-err");
       if(r.cleanverse?.reason) log(`Cleanverse verify_apass: ${r.cleanverse.reason}`,"l-err");
       log("the compliance gate refused the transfer.","l-ok");
-      step=2;
+      goTo("compromise");
     }
     else if(action==="compromise"){
       log("wallet A private key lost / compromised (scenario event — no on-chain change).","l-warn");
       log("asset is safe (gate blocks theft) but stuck — Alice can't move it either. Nothing is frozen yet.","l-dim");
-      step=3;
+      goTo("claim");
     }
     else if(action==="claim"){
       log("proving identity equivalence via query_apass_list…","l-info");
@@ -711,7 +790,22 @@ async function run(action){
       log("guardian co-signature collected and verified against guardianOf","l-ok");
       log(`claim #${claimId} opened · wallet A FROZEN · ${short(r.txHash)}`,"l-ok");
       document.getElementById("claimchip").textContent=`claim #${claimId}`;
-      step=4;
+      goTo("review");
+    }
+    else if(action==="commit"){
+      log("issuer review passed — underwriting the claim…","l-info");
+      const r=await post("/api/commit",{claimId});
+      log(`commit() executed · the issuer can no longer cancel this claim · ${short(r.txHash)}`,"l-ok");
+      log("the claim is now a receivable a lender can price.","l-dim");
+      await refreshAdvance();
+      goTo("advance");
+    }
+    else if(action==="drawAdvance"){
+      log("wallet B signs an advance authorisation (no gas needed)…","l-info");
+      const r=await post("/api/advance/draw",{claimId});
+      log(`advance drawn · ${r.received} ${advance.stableSymbol} to wallet B · ${short(r.txHash)}`,"l-ok");
+      log(`${r.dueNote} NOTE will be taken from the recovery at settlement.`,"l-dim");
+      await refreshAdvance();
     }
     else if(action==="reject"){
       log("issuer review: claim flagged as fraudulent impersonation…","l-warn");
@@ -745,9 +839,12 @@ async function run(action){
       if(!ready) log("still propagating — attempting execution anyway…","l-warn");
       log("executor moving balance  A → B…","l-info");
       const r=await post("/api/execute",{claimId});
-      lastTx=r.txHash; recovered=true;
+      lastTx=r.txHash; recovered=true; lastSplit=r.split||null;
+      if(r.split){
+        log(`advance repaid from the recovery · ${r.split.toVault} NOTE to the vault`,"l-ok");
+      }
       log(`RECOVERED · A: ${units(r.oldBalance)} NOTE · B: ${units(r.newBalance)} NOTE · ${short(r.txHash)}`,"l-ok");
-      stopTimer(); step=5;
+      stopTimer(); goTo("done");
     }
   }catch(e){ log("ERROR "+e.message,"l-err"); }
   renderStage(); refresh();
@@ -807,6 +904,21 @@ async function refresh(){
   }
 }
 
+/* ---------- bridge advance state ---------- */
+/**
+ * The vault's view of the current claim: what it would lend, and whether an
+ * advance is already outstanding. Also carries the claim's note value so the
+ * advance beat can show what the LTV is a percentage of.
+ */
+async function refreshAdvance(){
+  if(!advance.enabled || claimId===null){ adv=null; return; }
+  adv=await getJSON(`/api/advance/${claimId}`);
+  if(adv && W.A){
+    const st=await getJSON(`/api/state?wallets=${W.A}`);
+    adv.claimNote=st?.wallets?.[W.A]?.balance ?? null;
+  }
+}
+
 /* ---------- resume ---------- */
 /**
  * Rebuild the step from chain state.
@@ -829,15 +941,42 @@ async function resume(){
     if(c){
       claimId=id;
       document.getElementById("claimchip").textContent=`claim #${id}`;
-      if(c.claim.executed){ recovered=true; step=5; return true; }
-      if(c.claim.cancelled){ rejected=true;  step=4; return true; }
-      step=4; return true;
+      if(c.claim.executed){
+        recovered=true;
+        // Rebuild the settlement split so a reload still shows how the
+        // recovery was divided; previewSplit reports nothing once the advance
+        // is settled, so it comes from the advance record instead.
+        if(advance.enabled){
+          await refreshAdvance();
+          const a=adv?.advance;
+          if(a?.drawn){
+            const kept=parseFloat(st.wallets?.[W.B]?.balance||0);
+            const toVault=parseFloat(a.dueNote||0);
+            lastSplit={
+              total:(kept+toVault).toLocaleString(),
+              toVault:a.dueNote,
+              toWallet:String(kept),
+            };
+          }
+        }
+        goTo("done"); return true;
+      }
+      if(c.claim.cancelled){ rejected=true;  goTo("review"); return true; }
+
+      // A committed claim has passed review and is what the vault lends
+      // against, so a resumed session belongs on the advance beat.
+      if(advance.enabled && c.claim.committed){
+        await refreshAdvance();
+        goTo("advance");
+        return true;
+      }
+      goTo("review"); return true;
     }
   }
 
   const balA=parseFloat(st.wallets?.[W.A]?.balance||0);
-  step=balA>0?1:0;
-  return step>0;
+  goTo(balA>0?"steal":"register");
+  return balA>0;
 }
 
 /* ---------- boot ---------- */
@@ -850,6 +989,8 @@ async function boot(){
   }
 
   W=cfg.wallets;
+  advance=cfg.advance||{enabled:false};
+  buildBeats();
   if(W.G) document.getElementById("aG").textContent=W.G;
   else document.getElementById("guardianRow").style.display="none";
   cureWindow=cfg.cureWindow;

@@ -254,6 +254,9 @@ app.get("/api/claim/:id", async (req, res) => {
         cancelled: c.cancelled,
         executed: c.executed,
         issuerApproved: c.issuerApproved,
+        // Needed by the UI to resume onto the advance beat, and by anything
+        // deciding whether this claim can be lent against.
+        committed: c.committed,
       },
       timeRemaining: Number(await queue.timeRemaining(id)),
       executable: await queue.isExecutable(id),
