@@ -110,6 +110,29 @@ export default function Demo(){
      stopped it ever re-enabling; here it simply cannot drift from the data. */
   const windowElapsed = remaining !== null && remaining <= 0;
 
+  /* Re-sync with the chain when this route is entered, but only when the chain
+     is demonstrably ahead of us.
+
+     The beat lives in the store so navigating away does not restart Alice's
+     story — but that also means a claim opened from the recovery wizard or
+     settled from the console left this route a step behind, and the next click
+     would try to open a second claim against a wallet that already has one.
+
+     The guard matters: "key compromised" is pure narration with no on-chain
+     trace, so an unconditional resume on every mount would knock the reader
+     back a step for no reason. Only re-read when a claim exists that this
+     route has not accounted for. */
+  const resumeRef = useRef(S.resume);
+  useEffect(() => { resumeRef.current = S.resume; });
+  useEffect(() => {
+    if (!S.booted || S.claimCount === 0) return;
+    const behind = S.claimId === null || S.beat < S.beats.indexOf("review");
+    if (behind) resumeRef.current();
+    // Entering the route is the trigger; claimCount catches a claim that
+    // appeared while we were on another route.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [S.booted, S.claimCount]);
+
   /* Beat changes get one cascade. */
   useEffect(() => {
     const el = stageRef.current;

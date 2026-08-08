@@ -42,7 +42,17 @@ export default function Console(){
     return list;
   }, [S]);
 
-  useEffect(() => { if (S.booted) load(); }, [S.booted, load]);
+  /* Load once when the app has booted.
+     `load` is deliberately NOT a dependency. It closes over the whole store
+     object, which is a new value on every provider render, so depending on its
+     identity made this effect re-run on every render: load -> setState ->
+     render -> load, a hot loop that fired ~5 requests a second. Each
+     /api/state is a dozen RPC reads, so against a public testnet endpoint that
+     is instant rate-limiting. A ref keeps the latest function without making
+     it a trigger. */
+  const loadRef = useRef(load);
+  useEffect(() => { loadRef.current = load; });
+  useEffect(() => { if (S.booted) loadRef.current(); }, [S.booted]);
 
   /* Countdowns tick locally between polls: re-reading the chain once a second
      per row would hammer the RPC for information we can infer. The offset is

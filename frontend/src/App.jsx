@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 
 import { useRebind } from "./store/RebindProvider.jsx";
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import Landing from "./routes/Landing.jsx";
 import Demo from "./routes/Demo.jsx";
 import Console from "./routes/Console.jsx";
@@ -106,6 +107,9 @@ export default function App(){
     <div id="app">
       <Nav />
       <main>
+        {/* Keyed on the route so recovering from an error on one screen does
+            not keep the error state pinned when you navigate to another. */}
+        <ErrorBoundary key={pathname}>
         <Routes>
           <Route path="/" element={<Landing />} />
           <Route path="/demo" element={<Demo />} />
@@ -113,6 +117,7 @@ export default function App(){
           <Route path="/recover" element={<Recover />} />
           <Route path="*" element={<Landing />} />
         </Routes>
+        </ErrorBoundary>
       </main>
       <Footer />
     </div>

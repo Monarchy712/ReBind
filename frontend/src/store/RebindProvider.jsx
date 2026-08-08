@@ -258,7 +258,12 @@ export function RebindProvider({ children }){
     return () => clearInterval(t);
   }, [config, refreshState]);
 
-  const value = {
+  /* Memoised so consumers are not handed a new object on every render. An
+     unmemoised context value re-renders every subscriber whenever anything
+     here changes, and any consumer effect that depends on a callback from it
+     re-runs on every render — which is exactly how the console ended up
+     re-fetching in a loop. */
+  const value = useMemo(() => ({
     // config
     config, booted, wallets, guardian, advance, customerId,
     cureWindow:config?.cureWindow ?? null, localMode:!!config?.localMode,
@@ -275,7 +280,14 @@ export function RebindProvider({ children }){
     lastSplit, setLastSplit,
     adv, setAdv,
     resume,
-  };
+  }), [
+    config, booted, wallets, guardian, advance, customerId,
+    balances, contracts, claimCount, claims,
+    refreshState, refreshClaims, refreshAdvance,
+    online, connDetail,
+    beats, beat, beatId, goTo, atOrPast,
+    claimId, rejected, recovered, lastSplit, adv, resume,
+  ]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
