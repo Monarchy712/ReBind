@@ -154,7 +154,9 @@ class Attestor {
 
     const signature = await guardianSigner.signTypedData(
       this.domain(),
-      GUARDIAN_EIP712_TYPES,   // <-- distinct type
+      // A distinct type, so an attestor signature can never be replayed as the
+      // guardian's half of the same claim.
+      GUARDIAN_EIP712_TYPES,
       { personId, oldWallet, newWallet, nonce, deadline }
     );
 

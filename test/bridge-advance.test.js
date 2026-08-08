@@ -20,18 +20,31 @@ const FEE_BPS = 50;
 const note = (n) => ethers.parseUnits(String(n), NOTE_DEC);
 const usd = (n) => ethers.parseUnits(String(n), STABLE_DEC);
 
+const CLAIM_FIELDS = [
+  { name: "personId", type: "bytes32" },
+  { name: "oldWallet", type: "address" },
+  { name: "newWallet", type: "address" },
+  { name: "nonce", type: "uint256" },
+  { name: "deadline", type: "uint256" },
+];
+
+// The attestor and the guardian sign the same payload under *different* EIP-712
+// types, so a stolen attestor signature is not also a valid guardian co-signature.
+const ATTESTOR_TYPES = { RecoveryClaim: CLAIM_FIELDS };
+const GUARDIAN_TYPES = { GuardianRecoveryClaim: CLAIM_FIELDS };
+
 async function signClaim(attestor, queueAddr, chainId, { personId, oldWallet, newWallet, nonce, deadline }) {
   return attestor.signTypedData(
     { name: "Rebind", version: "1", chainId, verifyingContract: queueAddr },
-    {
-      RecoveryClaim: [
-        { name: "personId", type: "bytes32" },
-        { name: "oldWallet", type: "address" },
-        { name: "newWallet", type: "address" },
-        { name: "nonce", type: "uint256" },
-        { name: "deadline", type: "uint256" },
-      ],
-    },
+    ATTESTOR_TYPES,
+    { personId, oldWallet, newWallet, nonce, deadline }
+  );
+}
+
+async function signGuardianClaim(guardian, queueAddr, chainId, { personId, oldWallet, newWallet, nonce, deadline }) {
+  return guardian.signTypedData(
+    { name: "Rebind", version: "1", chainId, verifyingContract: queueAddr },
+    GUARDIAN_TYPES,
     { personId, oldWallet, newWallet, nonce, deadline }
   );
 }

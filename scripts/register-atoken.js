@@ -27,6 +27,18 @@ const CHAIN = process.env.CV_CHAIN || "base";
 const ICON = process.env.TOKEN_ICON || "https://images.cleanverse.com/app/token_icon/USDC.svg";
 
 async function main() {
+  // Cleanverse can only see a public chain. Registering the addresses from a
+  // local Hardhat deployment would submit a token nobody can resolve, and the
+  // rejection comes back minutes later as an opaque signature error.
+  if (D.chainId === 31337) {
+    console.error(
+      `deployments.json is a local deployment (chainId 31337, ${D.deployedAt}).\n` +
+      `There is nothing to register: run the demo with  npm run server:local\n` +
+      `To register for real, redeploy to a public chain:  npm run deploy`
+    );
+    process.exitCode = 1; return;
+  }
+
   const owner = new ethers.Wallet(normalizePrivateKey(process.env.DEPLOYER_PK));
   const message = `${CHAIN.toLowerCase()}${D.token.toLowerCase()}`;
 
@@ -40,6 +52,26 @@ async function main() {
   if (process.env.RPC_URL) {
     try {
       const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+
+      // A deployments.json from another network is the most common cause of a
+      // baffling registration failure, and it is cheap to rule out here.
+      const net = await provider.getNetwork();
+      if (Number(net.chainId) !== D.chainId) {
+        console.error(
+          `\nSTOP: RPC_URL is chainId ${net.chainId} but deployments.json was written on ` +
+          `${D.chainId} (${D.network}). Redeploy, or point RPC_URL at the right chain.`
+        );
+        process.exitCode = 1; return;
+      }
+      if ((await provider.getCode(D.token)) === "0x") {
+        console.error(
+          `\nSTOP: no contract at ${D.token} on ${process.env.RPC_URL}.\n` +
+          `A freshly deployed contract can take a few seconds to appear on a load-balanced ` +
+          `RPC — retry shortly. If it never appears, redeploy.`
+        );
+        process.exitCode = 1; return;
+      }
+
       const onchainOwner = await new ethers.Contract(
         D.token, ["function owner() view returns (address)"], provider
       ).owner();

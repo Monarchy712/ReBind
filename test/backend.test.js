@@ -36,6 +36,24 @@ describe("Backend", function () {
   beforeEach(function () { realFetch = globalThis.fetch; });
   afterEach(function () { globalThis.fetch = realFetch; });
 
+  // personIdOf() reads its salt from the environment and .env is gitignored, so
+  // on a fresh clone or in CI every test that derives a commitment — directly or
+  // through signClaim() — fails with "Set IDENTITY_COMMITMENT_SALT in .env".
+  // No assertion here depends on WHICH salt is used, only that one exists, so
+  // pin a known value instead of depending on the developer's .env.
+  const TEST_SALT = "test-only-identity-commitment-salt";
+  let savedSalt;
+
+  before(function () {
+    savedSalt = process.env.IDENTITY_COMMITMENT_SALT;
+    process.env.IDENTITY_COMMITMENT_SALT = TEST_SALT;
+  });
+
+  after(function () {
+    if (savedSalt === undefined) delete process.env.IDENTITY_COMMITMENT_SALT;
+    else process.env.IDENTITY_COMMITMENT_SALT = savedSalt;
+  });
+
   describe("Cleanverse — AES envelope", function () {
     // Trap #5 in the handbook: a 403 means the encryption is wrong, not auth.
     // Every one of these asserts a property that, if broken, produces that 403.

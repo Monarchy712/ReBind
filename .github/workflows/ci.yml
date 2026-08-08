@@ -78,9 +78,22 @@ jobs:
             echo "::error::A private key is committed. Rotate it, then remove it from the repo."
             exit 1
           fi
-          if git grep -nIE 'CV_API_(ID|KEY)[[:space:]]*=[[:space:]]*.+' \
+          # Match the SHAPE of a real credential, not merely the name. The old
+          # pattern took any right-hand side at all, so it fired on the unit
+          # tests' own fixtures (process.env.CV_API_ID = "APPTESTID0000000000")
+          # — which is precisely where a fake credential is supposed to live. A
+          # check that cries wolf on the correct thing gets ignored, so pin it
+          # to what a genuine value looks like: an api-id is APP + a timestamp,
+          # and an api-key is a long base64 literal. Assigning from a variable
+          # (= TEST_KEY) is a fixture and never matches.
+          if git grep -nIE 'CV_API_ID[[:space:]]*=[[:space:]]*"?APP[0-9]{12,}' \
                -- . ':!.env.example' ':!.github/workflows/ci.yml'; then
-            echo "::error::A Cleanverse credential is committed. Move it to .env."
+            echo "::error::A Cleanverse api-id is committed. Move it to .env."
+            exit 1
+          fi
+          if git grep -nIE 'CV_API_KEY[[:space:]]*=[[:space:]]*"?[A-Za-z0-9+/]{24,}={0,2}"?[[:space:]]*;?$' \
+               -- . ':!.env.example' ':!.github/workflows/ci.yml'; then
+            echo "::error::A Cleanverse api-key is committed. Rotate it, then move it to .env."
             exit 1
           fi
           echo "no committed credentials"
