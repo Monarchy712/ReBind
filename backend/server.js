@@ -57,14 +57,16 @@ let attestor;
     chainId: Number(net.chainId),
   });
 
-  if (process.env.GUARDIAN_PK) {
-    const guardianAddr = new ethers.Wallet(normalizePrivateKey(process.env.GUARDIAN_PK)).address;
-    if (guardianAddr.toLowerCase() === attestorWallet.address.toLowerCase()) {
-      throw new Error("FATAL: GUARDIAN_PK resolves to the same address as ATTESTOR_PK. These must be independent keys.");
-    }
-    console.log(`  guardian ${guardianAddr}`);
-  } else {
-    console.warn("  WARNING: GUARDIAN_PK not set. /api/claim will require guardianSignature in the request body.");
+  // The guardian is only a fourth layer if it is a genuinely different key from
+  // the attestor. Refuse to start rather than serve a demo that claims four
+  // independent signers and has three.
+  const gKey = guardianKey();
+  const guardianAddr = gKey ? new ethers.Wallet(gKey).address : null;
+  if (guardianAddr && guardianAddr.toLowerCase() === attestorWallet.address.toLowerCase()) {
+    throw new Error(
+      "GUARDIAN_PK resolves to the same address as ATTESTOR_PK. The guardian co-signature " +
+      "only adds a layer if the two keys are independent."
+    );
   }
 
   console.log(`Rebind backend`);
@@ -72,6 +74,11 @@ let attestor;
   console.log(`  chain    ${net.chainId} @ ${RPC_URL}`);
   console.log(`  token    ${D.token}`);
   console.log(`  attestor ${attestor.address}`);
+  if (guardianAddr) {
+    console.log(`  guardian ${guardianAddr}`);
+  } else {
+    console.warn("  guardian (none) — /api/claim will require a guardianSignature in the request body");
+  }
 })();
 
 const ok = (res, data) => res.json({ ok: true, ...data });
@@ -110,7 +117,7 @@ const fail = (res, e) => {
 app.post("/api/register", async (req, res) => {
   try {
     const { customerId, address, override, guardianAddress } = req.body;
-        if (!guardianAddress || !ethers.isAddress(guardianAddress) || guardianAddress === ethers.ZeroAddress) {
+    if (!guardianAddress || !ethers.isAddress(guardianAddress) || guardianAddress === ethers.ZeroAddress) {
       throw new Error("guardianAddress is required and must be a valid non-zero address");
     }
     if (guardianAddress.toLowerCase() === address.toLowerCase()) {
@@ -183,11 +190,11 @@ app.post("/api/claim", async (req, res) => {
       customerId, oldWallet, newWallet, nonce: Number(nonce), ttlSeconds,
     });
 
-    // Guardian co-signature collection:
-    // For demo simplicity and direct frontend flows, /api/claim accepts an explicit
-    // guardianSignature or automatically co-signs using a guardianPrivateKey supplied in
-    // the request or pre-seeded in the environment (fallback to attestor test key in demo mode).
+    // Guardian co-signature collection. A real deployment would collect this
+    // from the guardian out-of-band and pass it in as `guardianSignature`; for
+    // the demo we also accept a guardian key and co-sign here.
     let guardianSig = guardianSignature;
+    let guardianAddress = null;
     if (!guardianSig) {
       // Deliberately no ATTESTOR_PK fallback: signing the guardian's half with
       // the attestor's key would make the co-signature a formality and the
@@ -208,6 +215,7 @@ app.post("/api/claim", async (req, res) => {
         deadline: att.deadline,
       });
       guardianSig = gRes.signature;
+      guardianAddress = gRes.guardian;
     }
 
     const tx = await queue.openClaim(
@@ -234,6 +242,10 @@ app.post("/api/claim", async (req, res) => {
       executableAt: ev ? Number(ev.args.executableAt) : null,
       proof: att.proof,
       txHash: tx.hash,
+      // Who actually co-signed, so the UI can name the second signer instead of
+      // asserting one was involved. Null when the caller supplied the signature
+      // themselves and we never saw the key.
+      guardian: guardianAddress,
       cleanverseFreezeTx: cleanverseFreeze?.data?.txHash || null,
     });
   } catch (e) { fail(res, e); }
@@ -243,7 +255,9 @@ app.post("/api/claim", async (req, res) => {
 app.post("/api/guardian-sign", async (req, res) => {
   try {
     const { customerId, oldWallet, newWallet, nonce, deadline, guardianPrivateKey } = req.body;
-    const privKey = guardianPrivateKey || process.env.GUARDIAN_PK;
+    // Same rule as /api/claim: the guardian's half is never signed with the
+    // attestor key, so there is no ATTESTOR_PK fallback here either.
+    const privKey = (guardianPrivateKey && normalizePrivateKey(guardianPrivateKey)) || guardianKey();
     if (!privKey) throw new Error("guardianPrivateKey is required to co-sign");
     const gSig = await attestor.signGuardianClaim({
       privateKey: privKey,
@@ -485,10 +499,11 @@ const DEMO_WALLETS = {
  * The guardian's signing key.
  *
  * The guardian exists so that compromising the attestor key is not enough to
- * forge a claim. Falling back to ATTESTOR_PK — as the generic path does for
- * convenience — quietly collapses that fourth layer back into the third and
- * makes the demo assert a property it is not actually demonstrating. In local
- * mode we therefore hold a genuinely separate key.
+ * forge a claim. Falling back to ATTESTOR_PK would quietly collapse that fourth
+ * layer back into the third and make the demo assert a property it is not
+ * actually demonstrating, so there is no such fallback anywhere. In local mode
+ * we hold a genuinely separate key; otherwise the caller supplies GUARDIAN_PK
+ * or the signature itself.
  */
 function guardianKey() {
   if (process.env.GUARDIAN_PK) return normalizePrivateKey(process.env.GUARDIAN_PK);

@@ -181,6 +181,14 @@
   }
   .guardian .gaddr{font-family:var(--mono);font-size:11px;color:var(--ink-2);word-break:break-all}
   .guardian .gnote{font-size:12.5px;color:var(--muted);flex:1 1 320px}
+  /* Whether this backend can produce the co-signature itself, or a claim needs
+     one handed to it. Either way the signature is mandatory on-chain. */
+  .guardian .gstate{
+    font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+    padding:2px 7px;border:1px solid var(--rule);color:var(--faint);white-space:nowrap;
+  }
+  .guardian .gstate.ready{color:var(--good);border-color:currentColor}
+  .guardian .gstate.manual{color:var(--warn);border-color:currentColor}
 
   /* ------------------------------------------------------------- stepper */
   .rail{display:grid;grid-template-columns:repeat(6,1fr);gap:0;margin-bottom:34px}
@@ -419,7 +427,8 @@
     <div class="guardian" id="guardianRow">
       <span class="glabel">Guardian co-signer</span>
       <span class="gaddr" id="aG">—</span>
-      <span class="gnote">Nominated at registration. Must co-sign any recovery claim, so a compromised attestor key is not enough on its own.</span>
+      <span class="gstate" id="gState">—</span>
+      <span class="gnote">Nominated at registration and pinned to the identity. Must co-sign any recovery claim under its own EIP-712 type, so a compromised attestor key is not enough on its own.</span>
     </div>
 
     <div class="rail" id="rail"></div>
@@ -493,6 +502,10 @@ const API="";
    carried that as a setup step, and the "30 seconds" in the copy below silently
    lied whenever CURE_WINDOW was set to anything else. */
 let W={}, cureWindow=null, CID=null;
+/* The nominated guardian from /api/config: its address, and whether this backend
+   holds the guardian key or a claim must arrive with a signature already on it.
+   The co-signature is mandatory on-chain either way. */
+let guardian={address:null,canCoSign:false};
 /* Bridge advance config from /api/config, and the last state read for the
    current claim. Both stay inert when no vault is deployed. */
 let advance={enabled:false}, adv=null;
@@ -634,7 +647,7 @@ function renderStage(){
 
   if(id==="register"){
     s.innerHTML=view("Register Alice, then issue the asset",
-      "Wallet A receives an A-Pass under Alice's Cleanverse customerId and is issued 250 units of a compliance-restricted note. Wallet B is registered to the <em>same</em> customerId — that shared identity is what makes recovery possible later.",
+      "Wallet A receives an A-Pass under Alice's Cleanverse customerId and is issued 250 units of a compliance-restricted note. Wallet B is registered to the <em>same</em> customerId — that shared identity is what makes recovery possible later. Registration also nominates a <strong>guardian</strong>, shown below the ledger, who will have to co-sign any future claim. The registry pins it to the identity on the first binding: it cannot be the wallet or the attestor, and a later binding cannot swap it.",
       `<button onclick="run('register')">Register and mint 250 NOTE</button>`);
   }
   else if(id==="steal"){
@@ -649,7 +662,7 @@ function renderStage(){
   }
   else if(id==="claim"){
     s.innerHTML=view("Alice opens a recovery claim from wallet B",
-      "The attestor asks Cleanverse whether A and B share one customerId. They do, so it signs an EIP-712 attestation and opens a claim. The moment that claim opens, <strong>wallet A freezes</strong> — a stolen key cannot move the asset while the claim is under review.",
+      "The attestor asks Cleanverse whether A and B share one customerId. They do, so it signs an EIP-712 attestation — but that alone opens nothing. The nominated <strong>guardian</strong> must co-sign the same claim under a separate EIP-712 type, so a stolen attestor key cannot forge both halves. The queue verifies both signatures or reverts. The moment the claim opens, <strong>wallet A freezes</strong> — a stolen key cannot move the asset while the claim is under review.",
       `<button onclick="run('claim')">Prove identity and open a claim</button>`);
   }
   else if(id==="review"){
@@ -755,13 +768,19 @@ async function run(action){
   const btns=document.querySelectorAll(".stage button"); btns.forEach(b=>b.disabled=true);
   try{
     if(action==="register"){
-      log("registering A-Pass for wallet A…","l-info");
       // The guardian is nominated at registration and is required to co-sign
       // any future recovery claim, so a compromised attestor key is not enough
-      // on its own to forge one.
-      const guardianAddress=W.G;
+      // on its own to forge one. Without one there is nothing to demonstrate,
+      // and the registry would reject the binding anyway.
+      const guardianAddress=guardian.address;
+      if(!guardianAddress){
+        log("set DEMO_WALLET_G (or run local demo mode, which generates one) and reload.","l-dim");
+        throw new Error("No guardian configured. Registration must nominate a guardian address.");
+      }
+      log("registering A-Pass for wallet A…","l-info");
       let r=await post("/api/register",{customerId:CID,address:W.A,guardianAddress});
       log(`guardian nominated · ${guardianAddress}`,"l-dim");
+      log("the registry pins this guardian to the identity — a later binding cannot swap it.","l-dim");
       log(`wallet A verified · A-Pass under ${CID}`,"l-ok");
       r=await post("/api/register",{customerId:CID,address:W.B,override:true,guardianAddress});
       log(`wallet B bound to the SAME customerId${r.cleanverse?.cvRecordId?` · record ${r.cleanverse.cvRecordId}`:""}`,"l-ok");
@@ -787,7 +806,11 @@ async function run(action){
       const r=await post("/api/claim",{customerId:CID,oldWallet:W.A,newWallet:W.B});
       claimId=r.claimId; rejected=false; windowElapsed=false; totalWindow=null;
       log("equivalence confirmed · both wallets → one customerId","l-ok");
-      log("guardian co-signature collected and verified against guardianOf","l-ok");
+      // openClaim() reverts unless BOTH signatures verify, so reaching this line
+      // is itself the proof that the guardian co-signed. Name the signer the
+      // backend actually used rather than asserting one existed.
+      log(`guardian co-signature verified against guardianOf${r.guardian?` · ${r.guardian}`:""}`,"l-ok");
+      log("attestor and guardian sign different EIP-712 types — one key cannot produce both halves.","l-dim");
       log(`claim #${claimId} opened · wallet A FROZEN · ${short(r.txHash)}`,"l-ok");
       document.getElementById("claimchip").textContent=`claim #${claimId}`;
       goTo("review");
@@ -819,6 +842,7 @@ async function run(action){
       log("opening a fresh, genuine recovery claim…","l-info");
       const r=await post("/api/claim",{customerId:CID,oldWallet:W.A,newWallet:W.B});
       claimId=r.claimId; rejected=false; windowElapsed=false; totalWindow=null;
+      log(`guardian co-signature verified against guardianOf${r.guardian?` · ${r.guardian}`:""}`,"l-ok");
       log(`claim #${claimId} opened · wallet A FROZEN · ${short(r.txHash)}`,"l-ok");
       document.getElementById("claimchip").textContent=`claim #${claimId}`;
     }
@@ -876,6 +900,33 @@ function startTimer(){
       log("challenge window elapsed — recovery is now executable.","l-info");
     }
   },1000);
+}
+
+/* ---------- guardian row ---------- */
+/**
+ * The guardian is a signer, not a holder, so it gets a line under the ledger
+ * rather than a balance card. The row also says whether this backend can produce
+ * the co-signature itself: without a guardian key the demo cannot open a claim,
+ * and it is better to say so here than to fail at the claim step.
+ */
+function renderGuardian(){
+  const row=document.getElementById("guardianRow");
+  const state=document.getElementById("gState");
+  if(!guardian.address){
+    row.style.display="none";
+    return;
+  }
+  row.style.display="";
+  document.getElementById("aG").textContent=guardian.address;
+  if(guardian.canCoSign){
+    state.textContent="can co-sign";
+    state.className="gstate ready";
+    state.title="The backend holds the guardian key and will co-sign claims it opens.";
+  }else{
+    state.textContent="signature required";
+    state.className="gstate manual";
+    state.title="No guardian key on this backend. Set GUARDIAN_PK, or pass guardianSignature to /api/claim. It must not be the attestor key.";
+  }
 }
 
 /* ---------- live wallet state ---------- */
@@ -990,9 +1041,9 @@ async function boot(){
 
   W=cfg.wallets;
   advance=cfg.advance||{enabled:false};
+  guardian=cfg.guardian||{address:W.G||null,canCoSign:false};
   buildBeats();
-  if(W.G) document.getElementById("aG").textContent=W.G;
-  else document.getElementById("guardianRow").style.display="none";
+  renderGuardian();
   cureWindow=cfg.cureWindow;
   CID=sessionCustomerId(cfg.token);
   document.getElementById("footMode").textContent=cfg.localMode?"local demo mode":`chain ${cfg.chainId}`;
