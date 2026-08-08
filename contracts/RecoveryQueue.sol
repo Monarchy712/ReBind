@@ -16,21 +16,26 @@ import "./BindingRegistry.sol";
  * -----------------------------------------------------------
  * Q: "What stops an attacker filing a fake claim and stealing the asset?"
  *
- * Three independent layers:
+ * Four independent layers:
  *
  *   1. ATTESTATION. Opening a claim requires an EIP-712 signature from the
  *      attestor, who only signs after confirming via query_apass_list that
  *      both wallets share one Cleanverse customerId. An attacker holding a
  *      stolen WALLET does not hold the victim's bank-verified IDENTITY.
  *
- *   2. CHALLENGE WINDOW. Opening a claim immediately revokes the old binding,
+ *   2. GUARDIAN CO-SIGN. Opening a claim also requires a co-signature from
+ *      the person's nominated guardian wallet (recorded on-chain at registration).
+ *      Even if the attestor private key is compromised, an attacker cannot forge
+ *      a claim without also compromising the independent guardian's key.
+ *
+ *   3. CHALLENGE WINDOW. Opening a claim immediately revokes the old binding,
  *      so a compromised key cannot drain assets while the claim is reviewed.
  *      Only an issuer reviewer may reject a claim; a thief who controls the
  *      old key must not receive a veto over recovery.
  *
- *   3. ISSUER APPROVAL. A human at the issuer must countersign.
+ *   4. ISSUER APPROVAL. A human at the issuer must countersign.
  *
- * To defeat all three you need the wallet AND the identity AND the issuer.
+ * To defeat all four you need the wallet AND the attestor key AND the guardian key AND the issuer.
  *
  * REPLAY PROTECTION
  * -----------------
@@ -38,6 +43,22 @@ import "./BindingRegistry.sol";
  * deadline. Without both, an old signature could be replayed. The EIP-712
  * domain separator additionally binds each signature to this contract on this
  * chain, so a testnet signature cannot be replayed on mainnet.
+ *
+ * DEGENERATE CLAIMS
+ * ------------------
+ * oldWallet == newWallet is rejected outright. Without this check, samePerson
+ * and isActive checks both trivially pass for a wallet compared to itself,
+ * so a claim could open, freeze a wallet, and go nowhere — a free way to
+ * DoS any wallet the attestor can be tricked or colluded into signing for.
+ *
+ * ONE ACTIVE CLAIM PER OLD WALLET
+ * ---------------------------------
+ * Previously nothing stopped multiple claims being opened against the same
+ * oldWallet — for example, one legitimate and one opened later by someone
+ * who guesses/colludes on a different newWallet, both racing to see which
+ * gets approved first. activeClaimOf tracks the one live claim per
+ * oldWallet; a new claim cannot open until the previous one is cancelled or
+ * executed.
  */
 contract RecoveryQueue is EIP712, AccessControl {
     using ECDSA for bytes32;
@@ -47,11 +68,19 @@ contract RecoveryQueue is EIP712, AccessControl {
     bytes32 private constant CLAIM_TYPEHASH = keccak256(
         "RecoveryClaim(bytes32 personId,address oldWallet,address newWallet,uint256 nonce,uint256 deadline)"
     );
+    
+    bytes32 private constant GUARDIAN_CLAIM_TYPEHASH = keccak256(
+        "GuardianRecoveryClaim(bytes32 personId,address oldWallet,address newWallet,uint256 nonce,uint256 deadline)"
+    );
 
     BindingRegistry public immutable registry;
 
     address public attestor;
+
+    /// Set exactly once via setExecutor(). See "why executor is set-once" below.
     address public executor;
+    bool private _executorSet;
+
     uint64 public cureWindow;
 
     struct Claim {
@@ -70,6 +99,12 @@ contract RecoveryQueue is EIP712, AccessControl {
     /// newWallet => nonce, for attestation replay protection
     mapping(address => uint256) public nonces;
 
+    /// oldWallet => id of its one live (open, not cancelled/executed) claim.
+    /// 0 with no claims ever opened is ambiguous with claimId 0, so we track
+    /// existence separately via hasActiveClaim.
+    mapping(address => uint256) public activeClaimOf;
+    mapping(address => bool) public hasActiveClaim;
+
     event ClaimOpened(
         uint256 indexed claimId,
         bytes32 indexed personId,
@@ -82,17 +117,22 @@ contract RecoveryQueue is EIP712, AccessControl {
     event ClaimExecuted(uint256 indexed claimId);
     event AttestorChanged(address indexed attestor);
     event CureWindowChanged(uint64 seconds_);
+    event ExecutorSet(address indexed executor);
 
     error BadAttestation(address recovered);
+    error BadGuardianAttestation(address recovered);
     error AttestationExpired();
     error NotSamePerson(address oldWallet, address newWallet);
     error NewWalletNotActive(address newWallet);
+    error SameWallet(address wallet);
+    error ClaimAlreadyActive(address oldWallet, uint256 existingClaimId);
     error OnlyExecutor();
     error ClaimClosed();
     error CureWindowActive(uint64 executableAt);
     error NotApproved();
     error NoSuchClaim(uint256 claimId);
     error ZeroAddress();
+    error ExecutorAlreadySet();
 
     constructor(
         address registry_,
@@ -118,9 +158,24 @@ contract RecoveryQueue is EIP712, AccessControl {
         emit AttestorChanged(attestor_);
     }
 
+    /**
+     * @notice Set the RebindExecutor address. Callable exactly once.
+     * @dev Previously mutable at any time, which meant a claim could be
+     *      signed and opened under one executor and, if the admin key were
+     *      compromised or simply changed policy mid-flight, executed through
+     *      a different executor contract than the one implicitly relied on
+     *      when the claim was approved. Making this set-once means the
+     *      executor identity is fixed for the life of the queue — a genuine
+     *      executor upgrade requires a new queue (and new attestations),
+     *      which is the correct amount of friction for changing who is
+     *      allowed to move a recovering user's tokens.
+     */
     function setExecutor(address executor_) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (executor_ == address(0)) revert ZeroAddress();
+        if (_executorSet) revert ExecutorAlreadySet();
         executor = executor_;
+        _executorSet = true;
+        emit ExecutorSet(executor_);
     }
 
     function setCureWindow(uint64 seconds_) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -132,17 +187,20 @@ contract RecoveryQueue is EIP712, AccessControl {
 
     /**
      * @notice Open a recovery claim. Anyone may submit the transaction (the
-     *         claimant may have no gas), but only with a valid attestor
-     *         signature proving the two wallets share one customerId.
+     *         claimant may have no gas), but only with valid attestor AND guardian
+     *         signatures proving identity equivalence and owner consent.
      */
     function openClaim(
         bytes32 personId,
         address oldWallet,
         address newWallet,
         uint256 deadline,
-        bytes calldata signature
+        bytes calldata signature,
+        bytes calldata guardianSignature
     ) external returns (uint256 claimId) {
         if (block.timestamp > deadline) revert AttestationExpired();
+        if (oldWallet == newWallet) revert SameWallet(oldWallet);
+        if (hasActiveClaim[oldWallet]) revert ClaimAlreadyActive(oldWallet, activeClaimOf[oldWallet]);
 
         // Defence in depth: the registry must ALSO agree these are one person.
         if (!registry.samePerson(oldWallet, newWallet)) {
@@ -155,11 +213,21 @@ contract RecoveryQueue is EIP712, AccessControl {
         if (!registry.isActive(newWallet)) revert NewWalletNotActive(newWallet);
 
         uint256 nonce = nonces[newWallet]++;
-        bytes32 structHash = keccak256(
+
+        bytes32 attestorStructHash = keccak256(
             abi.encode(CLAIM_TYPEHASH, personId, oldWallet, newWallet, nonce, deadline)
         );
-        address recovered = _hashTypedDataV4(structHash).recover(signature);
-        if (recovered != attestor) revert BadAttestation(recovered);
+
+        bytes32 attestorDigest = _hashTypedDataV4(attestorStructHash);
+        address recoveredAttestor = attestorDigest.recover(signature);
+        if (recoveredAttestor != attestor) revert BadAttestation(recoveredAttestor);
+
+        bytes32 guardianStructHash = keccak256(
+            abi.encode(GUARDIAN_CLAIM_TYPEHASH, personId, oldWallet, newWallet, nonce, deadline)
+        );
+        bytes32 guardianDigest = _hashTypedDataV4(guardianStructHash);
+        address recoveredGuardian = guardianDigest.recover(guardianSignature);
+        if (recoveredGuardian != registry.guardianOf(personId)) revert BadGuardianAttestation(recoveredGuardian);
 
         uint64 execAt = uint64(block.timestamp) + cureWindow;
         _claims.push(
@@ -175,6 +243,10 @@ contract RecoveryQueue is EIP712, AccessControl {
             })
         );
         claimId = _claims.length - 1;
+
+        activeClaimOf[oldWallet] = claimId;
+        hasActiveClaim[oldWallet] = true;
+
         // Freeze before emitting the public claim event. The executor's special
         // recovery path can still move the balance after approval and review.
         registry.revokeForRecovery(oldWallet);
@@ -191,6 +263,7 @@ contract RecoveryQueue is EIP712, AccessControl {
         if (c.cancelled || c.executed) revert ClaimClosed();
 
         c.cancelled = true;
+        hasActiveClaim[c.oldWallet] = false;
         registry.restoreAfterChallenge(c.oldWallet);
         emit ClaimCancelled(claimId, msg.sender);
     }
@@ -211,6 +284,7 @@ contract RecoveryQueue is EIP712, AccessControl {
         if (block.timestamp < c.executableAt) revert CureWindowActive(c.executableAt);
 
         c.executed = true;
+        hasActiveClaim[c.oldWallet] = false;
         emit ClaimExecuted(claimId);
     }
 

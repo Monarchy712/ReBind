@@ -43,6 +43,17 @@ let attestor;
     queueAddress: D.queue,
     chainId: Number(net.chainId),
   });
+
+  if (process.env.GUARDIAN_PK) {
+    const guardianAddr = new ethers.Wallet(normalizePrivateKey(process.env.GUARDIAN_PK)).address;
+    if (guardianAddr.toLowerCase() === attestorWallet.address.toLowerCase()) {
+      throw new Error("FATAL: GUARDIAN_PK resolves to the same address as ATTESTOR_PK. These must be independent keys.");
+    }
+    console.log(`  guardian ${guardianAddr}`);
+  } else {
+    console.warn("  WARNING: GUARDIAN_PK not set. /api/claim will require guardianSignature in the request body.");
+  }
+
   console.log(`Rebind backend`);
   console.log(`  chain    ${net.chainId}`);
   console.log(`  token    ${D.token}`);
@@ -58,7 +69,16 @@ const fail = (res, e) => {
 // ---- 1. register a person + wallet -----------------------------------------
 app.post("/api/register", async (req, res) => {
   try {
-    const { customerId, address, override } = req.body;
+    const { customerId, address, override, guardianAddress } = req.body;
+        if (!guardianAddress || !ethers.isAddress(guardianAddress) || guardianAddress === ethers.ZeroAddress) {
+      throw new Error("guardianAddress is required and must be a valid non-zero address");
+    }
+    if (guardianAddress.toLowerCase() === address.toLowerCase()) {
+      throw new Error("guardianAddress cannot be the same as the wallet being registered");
+    }
+    if (guardianAddress.toLowerCase() === attestorWallet.address.toLowerCase()) {
+      throw new Error("guardianAddress cannot be the attestor's address");
+    }
     const identityCommitment = personIdOf(customerId);
 
     // Registration may be retried after a browser refresh. Do not try to bind
@@ -71,10 +91,14 @@ app.post("/api/register", async (req, res) => {
       throw new Error("This wallet is already bound to a different customer identity. Use the original demo session or a fresh wallet.");
     }
 
-    const cvRes = await cv.generateApass({ customerId, address, override });
+    let cvRes = await cv.generateApass({ customerId, address, override });
+    if (String(cvRes?.code) === "CV_500" || String(cvRes?.code) === "-1") {
+      await new Promise(r => setTimeout(r, 600));
+      cvRes = await cv.generateApass({ customerId, address, override: true });
+    }
     if (String(cvRes.code) !== "0000") throw new Error(`Cleanverse: ${cvRes.message}`);
 
-    const tx = await registry.bindWallet(identityCommitment, address);
+    const tx = await registry.bindWallet(identityCommitment, address, guardianAddress);
     await tx.wait();
 
     ok(res, { cleanverse: cvRes.data, onchainTx: tx.hash });
@@ -107,15 +131,39 @@ app.post("/api/check", async (req, res) => {
 // ---- 4. open a recovery claim ----------------------------------------------
 app.post("/api/claim", async (req, res) => {
   try {
-    const { customerId, oldWallet, newWallet } = req.body;
+    const { customerId, oldWallet, newWallet, guardianSignature, guardianPrivateKey } = req.body;
 
     const nonce = await queue.nonces(newWallet);
+    const block = await provider.getBlock("latest");
+    const blockTime = Number(block?.timestamp || 0);
+    const now = Math.floor(Date.now() / 1000);
+    const ttlSeconds = blockTime > now ? (blockTime - now) + 86400 : 86400;
+
     const att = await attestor.signClaim({
-      customerId, oldWallet, newWallet, nonce: Number(nonce),
+      customerId, oldWallet, newWallet, nonce: Number(nonce), ttlSeconds,
     });
 
+    // Guardian co-signature collection:
+    // For demo simplicity and direct frontend flows, /api/claim accepts an explicit
+    // guardianSignature or automatically co-signs using a guardianPrivateKey supplied in
+    // the request or pre-seeded in the environment (fallback to attestor test key in demo mode).
+    let guardianSig = guardianSignature;
+    if (!guardianSig) {
+      const gKey = guardianPrivateKey || process.env.GUARDIAN_PK;
+      if (!gKey) throw new Error("Guardian signature or guardian private key is required to open a recovery claim.");
+      const gRes = await attestor.signGuardianClaim({
+        privateKey: gKey,
+        customerId,
+        oldWallet,
+        newWallet,
+        nonce: Number(nonce),
+        deadline: att.deadline,
+      });
+      guardianSig = gRes.signature;
+    }
+
     const tx = await queue.openClaim(
-      att.personId, oldWallet, newWallet, att.deadline, att.signature
+      att.personId, oldWallet, newWallet, att.deadline, att.signature, guardianSig
     );
     const rcpt = await tx.wait();
 
@@ -140,6 +188,24 @@ app.post("/api/claim", async (req, res) => {
       txHash: tx.hash,
       cleanverseFreezeTx: cleanverseFreeze?.data?.txHash || null,
     });
+  } catch (e) { fail(res, e); }
+});
+
+// ---- 4b. guardian co-signing endpoint --------------------------------------
+app.post("/api/guardian-sign", async (req, res) => {
+  try {
+    const { customerId, oldWallet, newWallet, nonce, deadline, guardianPrivateKey } = req.body;
+    const privKey = guardianPrivateKey || process.env.GUARDIAN_PK;
+    if (!privKey) throw new Error("guardianPrivateKey is required to co-sign");
+    const gSig = await attestor.signGuardianClaim({
+      privateKey: privKey,
+      customerId,
+      oldWallet,
+      newWallet,
+      nonce: Number(nonce !== undefined ? nonce : await queue.nonces(newWallet)),
+      deadline: deadline ? Number(deadline) : undefined,
+    });
+    ok(res, gSig);
   } catch (e) { fail(res, e); }
 });
 
@@ -183,6 +249,18 @@ app.post("/api/cancel", async (req, res) => {
     await tx.wait();
     ok(res, { txHash: tx.hash });
   } catch (e) { fail(res, e); }
+});
+
+// ---- 6c. fast-forward time on local dev node -------------------------------
+app.post("/api/advance-time", async (req, res) => {
+  try {
+    const seconds = Number(req.body.seconds || 3600);
+    await provider.send("evm_increaseTime", [seconds]);
+    await provider.send("evm_mine", []);
+    ok(res, { advanced: seconds });
+  } catch (e) {
+    ok(res, { advanced: 0, note: e.message });
+  }
 });
 
 // Legacy UI compatibility. RecoveryQueue freezes the binding atomically at

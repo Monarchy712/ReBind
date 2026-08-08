@@ -33,6 +33,15 @@ import "./IERC1404.sol";
  * it is false again. The destination is STILL fully verified during recovery —
  * we relax the sender check only, never the recipient check. Recovery is a
  * compliance feature, not a compliance bypass.
+ *
+ * ERC-1404 PREVIEW PARITY
+ * -----------------------
+ * detectTransferRestriction() must agree with what _update() will actually do,
+ * or a caller trusting the preview gets a nasty surprise on the real call.
+ * _update() special-cases from==address(0) (mint: only recipient checked) and
+ * to==address(0) (burn: nobody checked). The preview now mirrors that exactly
+ * instead of unconditionally checking both sides, which previously reported
+ * a mint as blocked (SENDER_UNBOUND) purely because address(0) has no binding.
  */
 contract RebindableRWA is ERC20, Ownable, IERC1404 {
     BindingRegistry public immutable registry;
@@ -141,8 +150,10 @@ contract RebindableRWA is ERC20, Ownable, IERC1404 {
      * @notice Would this transfer be permitted right now?
      * @dev Mirrors the order of checks in `_update`, so a caller that sees
      *      SUCCESS here and still reverts is a bug worth knowing about.
-     *      Recovery is deliberately not modelled: it is not a transfer any
-     *      caller can initiate, so reporting it as permitted would be a lie.
+     *      Mint (from == 0) and burn (to == 0) are previewed with the same
+     *      one-sided logic _update() actually applies to them. Recovery is
+     *      deliberately not modelled: it is not a transfer any caller can
+     *      initiate, so reporting it as permitted would be a lie.
      */
     function detectTransferRestriction(address from, address to, uint256 value)
         external
@@ -150,6 +161,19 @@ contract RebindableRWA is ERC20, Ownable, IERC1404 {
         override
         returns (uint8)
     {
+        if (from == address(0)) {
+            // MINT preview: only the recipient matters, matching _update().
+            if (!registry.isActive(to) && !registry.revoked(to)) return RECIPIENT_UNBOUND;
+            if (registry.revoked(to)) return RECIPIENT_REVOKED;
+            return SUCCESS;
+        }
+
+        if (to == address(0)) {
+            // BURN preview: nobody is checked, matching _update().
+            if (balanceOf(from) < value) return INSUFFICIENT_BALANCE;
+            return SUCCESS;
+        }
+
         if (!registry.isActive(from) && !registry.revoked(from)) return SENDER_UNBOUND;
         if (registry.revoked(from)) return SENDER_REVOKED;
         if (!registry.isActive(to) && !registry.revoked(to)) return RECIPIENT_UNBOUND;
