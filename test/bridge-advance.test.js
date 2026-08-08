@@ -36,6 +36,22 @@ async function signClaim(attestor, queueAddr, chainId, { personId, oldWallet, ne
   );
 }
 
+async function signGuardianClaim(guardian, queueAddr, chainId, { personId, oldWallet, newWallet, nonce, deadline }) {
+  return guardian.signTypedData(
+    { name: "Rebind", version: "1", chainId, verifyingContract: queueAddr },
+    {
+      GuardianRecoveryClaim: [
+        { name: "personId", type: "bytes32" },
+        { name: "oldWallet", type: "address" },
+        { name: "newWallet", type: "address" },
+        { name: "nonce", type: "uint256" },
+        { name: "deadline", type: "uint256" },
+      ],
+    },
+    { personId, oldWallet, newWallet, nonce, deadline }
+  );
+}
+
 describe("Bridge advance", function () {
   let admin, attestor, issuer, alice, aliceNew, outsider, guardian;
   let registry, token, queue, executor, vault, stable, oracle;
@@ -57,7 +73,7 @@ describe("Bridge advance", function () {
     };
     const queueAddr = await queue.getAddress();
     const sig = await signClaim(attestor, queueAddr, chainId, payload);
-    const guardianSig = await signClaim(guardian, queueAddr, chainId, payload);
+    const guardianSig = await signGuardianClaim(guardian, queueAddr, chainId, payload);
 
     await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, guardianSig);
     return Number(await queue.claimCount()) - 1;
