@@ -30,18 +30,18 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
  * assert false bindings, so in production this becomes a multisig, and moves
  * fully on-chain if/when Cleanverse exposes customerId linkage on-chain.
  *
- * RECOVERY_ROLE WIRING
- * ---------------------
- * BindingRegistry and RecoveryQueue have a circular dependency: the queue
- * needs the registry's address at construction, and the registry needs to
- * grant the queue RECOVERY_ROLE. Previously this grant had to be done by hand
- * after both deploys, which is exactly the kind of step that gets forgotten
- * in a deploy script. setRecoveryQueue() makes that wiring a single, one-time,
- * on-chain call instead of a manual grantRole() someone has to remember.
+ * RECOVERY_ROLE & GUARDIAN_QUEUE_ROLE WIRING
+ * -------------------------------------------
+ * BindingRegistry has circular dependencies with the recovery and guardian queues.
+ * The queues need the registry's address at construction, and the registry needs
+ * to grant the queues their respective roles. setRecoveryQueue() and setGuardianQueue()
+ * make this wiring single, one-time, on-chain calls instead of manual grants someone
+ * has to remember.
  */
 contract BindingRegistry is AccessControl {
     bytes32 public constant ATTESTOR_ROLE = keccak256("ATTESTOR_ROLE");
     bytes32 public constant RECOVERY_ROLE = keccak256("RECOVERY_ROLE");
+    bytes32 public constant GUARDIAN_QUEUE_ROLE = keccak256("GUARDIAN_QUEUE_ROLE");
 
     /// wallet => opaque identity commitment (bytes32(0) means "never bound")
     mapping(address => bytes32) private _identityOf;
@@ -54,12 +54,15 @@ contract BindingRegistry is AccessControl {
 
     /// Set exactly once. See "RECOVERY_ROLE WIRING" above.
     address public recoveryQueue;
+    address public guardianQueue;
 
     event WalletBound(address indexed wallet);
     event GuardianSet(bytes32 indexed personId, address indexed guardian);
+    event GuardianReplaced(bytes32 indexed personId, address indexed newGuardian);
     event WalletRevoked(address indexed wallet, string reason);
     event WalletRestored(address indexed wallet);
     event RecoveryQueueSet(address indexed recoveryQueue);
+    event GuardianQueueSet(address indexed guardianQueue);
 
     error AlreadyBound(address wallet);
     error NotBound(address wallet);
@@ -67,8 +70,10 @@ contract BindingRegistry is AccessControl {
     error GuardianCannotBeAttestor(address guardian);
     error GuardianCannotBeWallet(address guardian);
     error GuardianMismatch(address expected, address supplied);
+    error SameGuardian(address guardian);
     error ZeroAddress();
     error RecoveryQueueAlreadySet();
+    error GuardianQueueAlreadySet();
 
     constructor(address admin, address attestor) {
         if (admin == address(0) || attestor == address(0)) revert ZeroAddress();
@@ -92,6 +97,15 @@ contract BindingRegistry is AccessControl {
         recoveryQueue = recoveryQueue_;
         _grantRole(RECOVERY_ROLE, recoveryQueue_);
         emit RecoveryQueueSet(recoveryQueue_);
+    }
+
+    function setGuardianQueue(address guardianQueue_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (guardianQueue_ == address(0)) revert ZeroAddress();
+        if (guardianQueue != address(0)) revert GuardianQueueAlreadySet();
+
+        guardianQueue = guardianQueue_;
+        _grantRole(GUARDIAN_QUEUE_ROLE, guardianQueue_);
+        emit GuardianQueueSet(guardianQueue_);
     }
 
     // ---------------------------------------------------------------- writes
@@ -169,6 +183,16 @@ contract BindingRegistry is AccessControl {
         if (_identityOf[wallet] == bytes32(0)) revert NotBound(wallet);
         revoked[wallet] = false;
         emit WalletRestored(wallet);
+    }
+
+    /// @notice Update the recovery guardian for an identity commitment.
+    /// @dev Only callable by the authorized guardian replacement queue.
+    function updateGuardian(bytes32 personId, address newGuardian) external onlyRole(GUARDIAN_QUEUE_ROLE) {
+        if (newGuardian == address(0)) revert ZeroAddress();
+        address oldGuardian = guardianOf[personId];
+        if (newGuardian == oldGuardian) revert SameGuardian(newGuardian);
+        guardianOf[personId] = newGuardian;
+        emit GuardianReplaced(personId, newGuardian);
     }
 
     // ----------------------------------------------------------------- reads

@@ -80,6 +80,7 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
 
     IAdvanceOracle public oracle;
     address public executor;
+    address public fallbackReceiver;
 
     /// Share of the claim's value advanced. The rest is the safety margin.
     uint16 public ltvBps;
@@ -93,6 +94,7 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
         uint128 dueNote;
         bool drawn;
         bool repaid;
+        bool defaulted;
     }
 
     /// claimId => advance
@@ -115,6 +117,8 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
     event TermsChanged(uint16 ltvBps, uint16 feeBps);
     event OracleChanged(address indexed oracle);
     event ExecutorChanged(address indexed executor);
+    event FallbackReceiverChanged(address indexed fallbackReceiver);
+    event RepaymentFailed(uint256 indexed claimId, uint256 owedNote, string reason);
 
     error ZeroAddress();
     error ClaimNotCommitted(uint256 claimId);
@@ -135,12 +139,13 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
         address stable_,
         address oracle_,
         address admin_,
+        address fallbackReceiver_,
         uint16 ltvBps_,
         uint16 feeBps_
     ) EIP712("RebindAdvance", "1") {
         if (
             queue_ == address(0) || note_ == address(0) || stable_ == address(0)
-                || oracle_ == address(0) || admin_ == address(0)
+                || oracle_ == address(0) || admin_ == address(0) || fallbackReceiver_ == address(0)
         ) revert ZeroAddress();
         if (ltvBps_ == 0 || ltvBps_ > BPS || feeBps_ > BPS) revert BadTerms();
 
@@ -148,6 +153,7 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
         note = RebindableRWA(note_);
         stable = IERC20(stable_);
         oracle = IAdvanceOracle(oracle_);
+        fallbackReceiver = fallbackReceiver_;
         ltvBps = ltvBps_;
         feeBps = feeBps_;
 
@@ -181,6 +187,12 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
         ltvBps = ltvBps_;
         feeBps = feeBps_;
         emit TermsChanged(ltvBps_, feeBps_);
+    }
+
+    function setFallbackReceiver(address fallbackReceiver_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (fallbackReceiver_ == address(0)) revert ZeroAddress();
+        fallbackReceiver = fallbackReceiver_;
+        emit FallbackReceiverChanged(fallbackReceiver_);
     }
 
     function depositLiquidity(uint256 amount) external onlyRole(TREASURY_ROLE) {
@@ -314,7 +326,8 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
             principalStable: uint128(principalStable),
             dueNote: uint128(dueNote),
             drawn: true,
-            repaid: false
+            repaid: false,
+            defaulted: false
         });
         totalPrincipalOutstanding += principalStable;
 
@@ -347,7 +360,7 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
         if (msg.sender != executor) revert OnlyExecutor();
 
         Advance storage a = _advances[claimId];
-        if (!a.drawn || a.repaid) revert NoAdvance(claimId);
+        if (!a.drawn || a.repaid || a.defaulted) revert NoAdvance(claimId);
 
         a.repaid = true;
         totalPrincipalOutstanding -= a.principalStable;
@@ -356,7 +369,22 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
         emit AdvanceRepaid(claimId, noteReceived, shortfall);
     }
 
+    function recordRepaymentFailure(uint256 claimId, string calldata reason) external {
+        if (msg.sender != executor) revert OnlyExecutor();
+
+        Advance storage a = _advances[claimId];
+        if (!a.drawn || a.repaid || a.defaulted) revert NoAdvance(claimId);
+
+        a.defaulted = true;
+
+        emit RepaymentFailed(claimId, a.dueNote, reason);
+    }
+
     // ----------------------------------------------------------------- views
+
+    function isDefaulted(uint256 claimId) external view returns (bool) {
+        return _advances[claimId].defaulted;
+    }
 
     function getAdvance(uint256 claimId) external view returns (Advance memory) {
         return _advances[claimId];

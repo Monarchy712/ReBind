@@ -359,6 +359,27 @@ before advances existed. Tune with `ADVANCE_LTV_BPS`, `ADVANCE_FEE_BPS` and
 
 ---
 
+## Security Upgrades: Guardian Replacement & Fallback Repayment
+
+### 1. Guardian Replacement Queue (`GuardianReplacementQueue.sol`)
+The `BindingRegistry` originally pinned the `guardianOf` identity forever. If a user lost access to their guardian key, recovery was blocked permanently. 
+
+To solve this, we introduced the **Guardian Replacement Queue** which matches the trust model of the main recovery flow:
+* **Attestor Attestation**: Initiating a replacement requires an EIP-712 signature from the Cleanverse attestor (`signGuardianChange`), proving the requesting wallet belongs to the customer ID.
+* **Wallet Remains Active**: Unlike a recovery claim, a guardian replacement **does not freeze** the wallet. The holder can continue using their funds during the challenge period.
+* **Challenge Window**: A 30-second challenge window (configurable in production, e.g., 24-48 hours) starts upon request opening, giving the issuer time to veto fraudulent replacements.
+* **Stale Attestation Check**: Reverts with `StaleGuardian(signedOldGuardian, liveOldGuardian)` if the old guardian in the attestation doesn't match the current live guardian on-chain (preventing replay attacks).
+
+### 2. Fallback Repayment & Failure Tolerance (`BridgeAdvanceVault.sol`)
+If a vault becomes insolvent or is revoked from the Cleanverse whitelist, its token transfers or `vault.settle()` calls could revert, causing the entire recovery execution transaction to fail and stranding the borrower's funds.
+
+We implemented try/catch safety tolerance in the settlement pipeline:
+* **Fallback Receiver**: The vault registers a `fallbackReceiver` address during deployment.
+* **Try/Catch Settlement**: During recovery execution, the `RebindExecutor` attempts to repay the vault. If the vault transfer or settlement reverts, the executor catches the error and redirects the note repayment to the `fallbackReceiver` instead.
+* **Defensive Netting**: If both the vault and the fallback receiver transfers fail, the executor nets the vault repayment to `0` and sends 100% of the recovered funds directly to the user's new wallet, ensuring the recovery never blocks.
+
+---
+
 ## Traps
 
 | Trap | Detail |

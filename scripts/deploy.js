@@ -166,6 +166,17 @@ async function main() {
   const queueAddr = await deployed("RecoveryQueue", queue);
   console.log("RecoveryQueue   ", queueAddr);
 
+  const guardianQueue = await (await ethers.getContractFactory("GuardianReplacementQueue")).deploy(
+    registryAddr,
+    queueAddr,
+    attestorAddr,
+    deployer.address,
+    CURE_WINDOW
+  );
+  await guardianQueue.waitForDeployment();
+  const guardianQueueAddr = await deployed("GuardianReplacementQueue", guardianQueue);
+  console.log("GuardianQueue   ", guardianQueueAddr);
+
   // ---- bridge advance stack ------------------------------------------------
   // Lets a claimant borrow against a committed claim while the cure window
   // runs. Set BRIDGE_ADVANCE=false to deploy without it; the executor then
@@ -178,6 +189,7 @@ async function main() {
   let stableAddr = ethers.ZeroAddress, vaultAddr = ethers.ZeroAddress;
   let stableIsOurs = false;
   let stableDecimals = 6;
+  let fallbackReceiverAddr = ethers.ZeroAddress;
 
   if (wantBridge) {
     // On a network with a real stablecoin, point STABLE_ADDRESS at it and the
@@ -221,12 +233,18 @@ async function main() {
       `(${NOTE_DECIMALS}/${stableDecimals} decimals, par)`
     );
 
+    fallbackReceiverAddr = process.env.FALLBACK_RECEIVER
+      ? address(process.env.FALLBACK_RECEIVER)
+      : deployer.address;
+    assertAddress("fallbackReceiverAddr", fallbackReceiverAddr);
+
     vault = await (await ethers.getContractFactory("BridgeAdvanceVault")).deploy(
       queueAddr,
       tokenAddr,
       stableAddr,
       oracleAddr,
       deployer.address,
+      fallbackReceiverAddr,
       LTV_BPS,
       FEE_BPS
     );
@@ -249,6 +267,8 @@ async function main() {
   await (await token.setExecutor(executorAddr)).wait();
   await (await queue.setExecutor(executorAddr)).wait();
   await (await registry.grantRole(await registry.RECOVERY_ROLE(), queueAddr)).wait();
+  await (await registry.setGuardianQueue(guardianQueueAddr)).wait();
+  await (await queue.setGuardianReplacementQueue(guardianQueueAddr)).wait();
 
   if (vault) {
     await (await vault.setExecutor(executorAddr)).wait();
@@ -288,6 +308,13 @@ async function main() {
     await (await registry.connect(attestorSigner).bindWallet(institutionId, vaultAddr, vaultGuardian)).wait();
     console.log(`  vault bound as an institutional wallet (guardian ${vaultGuardian})`);
 
+    if (fallbackReceiverAddr.toLowerCase() !== vaultAddr.toLowerCase()) {
+      const fallbackId = ethers.keccak256(ethers.toUtf8Bytes("REBIND_FALLBACK_RECEIVER_INSTITUTION"));
+      const dummyGuardian = "0x1111111111111111111111111111111111111111";
+      await (await registry.connect(attestorSigner).bindWallet(fallbackId, fallbackReceiverAddr, dummyGuardian)).wait();
+      console.log(`  fallback receiver bound as an institutional wallet (guardian ${dummyGuardian})`);
+    }
+
     // Seed lending liquidity so the demo can actually draw.
     const seed = process.env.ADVANCE_SEED || "100000";
     const seedUnits = ethers.parseUnits(seed, stableDecimals);
@@ -326,6 +353,7 @@ async function main() {
     registry: registryAddr,
     token: tokenAddr,
     queue: queueAddr,
+    guardianQueue: guardianQueueAddr,
     executor: executorAddr,
     stable: stableAddr === ethers.ZeroAddress ? null : stableAddr,
     oracle: oracle ? await oracle.getAddress() : null,

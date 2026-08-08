@@ -427,11 +427,52 @@
 
     <!-- The guardian holds no assets, so it is a note on the ledger rather
          than a fourth balance card. -->
-    <div class="guardian" id="guardianRow">
-      <span class="glabel">Guardian co-signer</span>
-      <span class="gaddr" id="aG">—</span>
-      <span class="gstate" id="gState">—</span>
+    <div class="guardian" id="guardianRow" style="padding-bottom: 24px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">
+        <div>
+          <span class="glabel">Guardian co-signer</span>
+          <span class="gaddr" id="aG">—</span>
+          <span class="gstate" id="gState">—</span>
+        </div>
+        <button id="replaceGBtn" class="ghost" style="padding: 6px 14px; font-size:12px;" onclick="toggleReplacePanel()">Replace Guardian</button>
+      </div>
       <span class="gnote">Nominated at registration and pinned to the identity. Must co-sign any recovery claim under its own EIP-712 type, so a compromised attestor key is not enough on its own.</span>
+      
+      <!-- Guardian replacement workflow panel -->
+      <div id="replaceGPanel" style="display:none; margin-top:20px; border-top:1px dashed var(--rule); padding-top:20px; text-align:left;">
+        <h3 style="font-family:var(--serif); font-size:18px; font-weight:400; margin-bottom:8px;">Initiate Guardian Replacement</h3>
+        <p style="font-size:13.5px; color:var(--ink-2); margin-bottom:16px; max-width:60ch; line-height:1.5;">
+          This will open a replacement request on-chain. The process uses Cleanverse identity verification and starts a 30s challenge window.
+          Crucially, Alice's wallet A remains <strong>fully active</strong> and is not frozen during this time.
+        </p>
+        
+        <div style="display:grid; grid-template-columns: 1fr; gap:12px; max-width:480px; margin-bottom:16px;">
+          <div>
+            <label style="font-size:11px; font-weight:600; text-transform:uppercase; color:var(--muted); display:block; margin-bottom:4px;">New Guardian Address</label>
+            <input type="text" id="newGAddress" style="width:100%; font-family:var(--mono); font-size:13px; padding:8px 10px; border:1px solid var(--rule); background:var(--paper); color:var(--ink);" placeholder="0x..." />
+          </div>
+        </div>
+
+        <div id="replaceGActions">
+          <button style="padding: 8px 16px; font-size:13px;" onclick="startGuardianReplacement()">Open replacement request</button>
+        </div>
+
+        <!-- Active replacement request status -->
+        <div id="replaceGStatus" style="display:none; margin-top:16px; border:1px solid var(--rule); padding:16px; background:var(--rule-2);">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <strong style="font-size:14px; color:var(--ink);">Active Request: #<span id="repReqId">—</span></strong>
+            <span id="repReqPill" class="pill" style="background:var(--accent-soft); color:var(--accent); font-weight:600; padding:2px 8px; font-size:11px;">Pending</span>
+          </div>
+          <div id="repReqTimerSection" style="margin-bottom:12px; display:flex; align-items:center; gap:12px;">
+            <div style="font-size:24px; font-family:var(--mono); font-weight:600;" id="repReqTimeRem">—</div>
+            <div style="font-size:11px; font-weight:600; text-transform:uppercase; color:var(--muted);">seconds remaining (cure window)</div>
+          </div>
+          <div style="display:flex; gap:12px;">
+            <button id="repReqFinalizeBtn" style="padding: 8px 16px; font-size:13px;" onclick="finalizeGuardianReplacement()" disabled>Finalize Replacement</button>
+            <button id="repReqCancelBtn" class="danger" style="padding: 8px 16px; font-size:13px;" onclick="cancelGuardianReplacement()">Cancel (Issuer Veto)</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="rail" id="rail"></div>
@@ -806,7 +847,12 @@ async function run(action){
     }
     else if(action==="claim"){
       log("proving identity equivalence via query_apass_list…","l-info");
-      const r=await post("/api/claim",{customerId:CID,oldWallet:W.A,newWallet:W.B});
+      const isReplaced = guardian.address && W.G && guardian.address.toLowerCase() !== W.G.toLowerCase();
+      const body = { customerId: CID, oldWallet: W.A, newWallet: W.B };
+      if (isReplaced) {
+        body.guardianPrivateKey = localStorage.getItem("rebind.newG.privateKey");
+      }
+      const r=await post("/api/claim", body);
       claimId=r.claimId; rejected=false; windowElapsed=false; totalWindow=null;
       log("equivalence confirmed · both wallets → one customerId","l-ok");
       // openClaim() reverts unless BOTH signatures verify, so reaching this line
@@ -843,7 +889,12 @@ async function run(action){
     }
     else if(action==="reopen"){
       log("opening a fresh, genuine recovery claim…","l-info");
-      const r=await post("/api/claim",{customerId:CID,oldWallet:W.A,newWallet:W.B});
+      const isReplaced = guardian.address && W.G && guardian.address.toLowerCase() !== W.G.toLowerCase();
+      const body = { customerId: CID, oldWallet: W.A, newWallet: W.B };
+      if (isReplaced) {
+        body.guardianPrivateKey = localStorage.getItem("rebind.newG.privateKey");
+      }
+      const r=await post("/api/claim", body);
       claimId=r.claimId; rejected=false; windowElapsed=false; totalWindow=null;
       log(`guardian co-signature verified against guardianOf${r.guardian?` · ${r.guardian}`:""}`,"l-ok");
       log(`claim #${claimId} opened · wallet A FROZEN · ${short(r.txHash)}`,"l-ok");
@@ -939,8 +990,12 @@ function renderGuardian(){
 async function refresh(){
   if(!W.A) return;
   const q=[W.A,W.B,W.X].filter(Boolean).join(",");
-  const r=await getJSON(`/api/state?wallets=${q}`);
+  const r=await getJSON(`/api/state?wallets=${q}&customerId=${CID}`);
   if(!r) return;
+  if(r.liveGuardian && r.liveGuardian !== "0x0000000000000000000000000000000000000000") {
+    guardian.address = r.liveGuardian;
+    renderGuardian();
+  }
   if(r.contracts) document.getElementById("chain").textContent=`chain ${r.contracts.chainId} · token ${r.contracts.token.slice(0,10)}…`;
   // Only the three asset-holding wallets have cards. The guardian is a
   // co-signer, not a holder, so it is shown as a line below the ledger.
@@ -1064,6 +1119,131 @@ async function boot(){
   renderStage();
   refresh();
   setInterval(refresh,4000);
+}
+
+/* ---------- guardian replacement UI logic ---------- */
+let repReqId = null;
+let repTimerInt = null;
+
+function generateRandomAddress() {
+  const chars = "0123456789abcdef";
+  let addr = "0x";
+  for (let i = 0; i < 40; i++) {
+    addr += chars[Math.floor(Math.random() * 16)];
+  }
+  return addr;
+}
+
+function toggleReplacePanel() {
+  const panel = document.getElementById("replaceGPanel");
+  const btn = document.getElementById("replaceGBtn");
+  if (panel.style.display === "none") {
+    panel.style.display = "block";
+    btn.textContent = "Close Panel";
+    // Pre-populate with a deterministic replaced guardian for which we hold the private key
+    const repGAddress = "0xd7191d8a88971fF6754336F6f8C79aaA28DDae9a";
+    const repGPrivKey = "0xfe712c60755f1db4b9f7630139861f719c4a5f0590477bd82e40ff83f4de8e29";
+    document.getElementById("newGAddress").value = repGAddress;
+    localStorage.setItem("rebind.newG.address", repGAddress);
+    localStorage.setItem("rebind.newG.privateKey", repGPrivKey);
+  } else {
+    panel.style.display = "none";
+    btn.textContent = "Replace Guardian";
+  }
+}
+
+async function startGuardianReplacement() {
+  const newG = document.getElementById("newGAddress").value.trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(newG)) {
+    log("ERROR: Invalid new guardian address format.", "l-err");
+    return;
+  }
+
+  log("requesting attestor signature for guardian change…", "l-info");
+  try {
+    const res = await post("/api/guardian-replace/open", {
+      customerId: CID,
+      wallet: W.A,
+      oldGuardian: guardian.address,
+      newGuardian: newG
+    });
+    
+    repReqId = res.requestId;
+    log(`guardian replacement request #${repReqId} opened · ${short(res.txHash)}`, "l-ok");
+    log("attestation verified · wallet A stays FULLY active (not frozen).", "l-info");
+
+    document.getElementById("replaceGStatus").style.display = "block";
+    document.getElementById("repReqId").textContent = repReqId;
+    document.getElementById("repReqPill").textContent = "Pending";
+    document.getElementById("repReqPill").className = "pill ok";
+
+    startReplaceTimer();
+  } catch (e) {
+    log("ERROR: " + e.message, "l-err");
+  }
+}
+
+function startReplaceTimer() {
+  if (repTimerInt) clearInterval(repTimerInt);
+  
+  repTimerInt = setInterval(async () => {
+    if (repReqId === null) return;
+    const r = await getJSON(`/api/guardian-replace/state/${repReqId}`);
+    if (!r) return;
+
+    if (r.cancelled) {
+      document.getElementById("repReqPill").textContent = "Cancelled";
+      document.getElementById("repReqPill").className = "pill bad";
+      document.getElementById("repReqTimeRem").textContent = "—";
+      document.getElementById("repReqFinalizeBtn").disabled = true;
+      document.getElementById("repReqCancelBtn").disabled = true;
+      clearInterval(repTimerInt);
+      return;
+    }
+
+    if (r.finalized) {
+      document.getElementById("repReqPill").textContent = "Finalized";
+      document.getElementById("repReqPill").className = "pill ok";
+      document.getElementById("repReqTimeRem").textContent = "00:00";
+      document.getElementById("repReqFinalizeBtn").disabled = true;
+      document.getElementById("repReqCancelBtn").disabled = true;
+      clearInterval(repTimerInt);
+      return;
+    }
+
+    const t = r.timeRemaining;
+    document.getElementById("repReqTimeRem").textContent = t > 0 ? `00:${pad2(t)}` : "00:00";
+    
+    if (t <= 0) {
+      document.getElementById("repReqFinalizeBtn").disabled = false;
+      document.getElementById("repReqPill").textContent = "Ready";
+    } else {
+      document.getElementById("repReqFinalizeBtn").disabled = true;
+    }
+  }, 1000);
+}
+
+async function cancelGuardianReplacement() {
+  if (repReqId === null) return;
+  log("issuer veto: cancelling guardian change request…", "l-warn");
+  try {
+    const res = await post("/api/guardian-replace/cancel", { requestId: repReqId });
+    log(`request #${repReqId} cancelled by issuer · ${short(res.txHash)}`, "l-ok");
+  } catch (e) {
+    log("ERROR: " + e.message, "l-err");
+  }
+}
+
+async function finalizeGuardianReplacement() {
+  if (repReqId === null) return;
+  log("finalizing guardian replacement on-chain…", "l-info");
+  try {
+    const res = await post("/api/guardian-replace/finalize", { requestId: repReqId });
+    log(`guardian replacement request #${repReqId} finalized · ${short(res.txHash)}`, "l-ok");
+    log("guardian address successfully updated in BindingRegistry!", "l-info");
+  } catch (e) {
+    log("ERROR: " + e.message, "l-err");
+  }
 }
 
 boot();

@@ -41,6 +41,8 @@ contract RebindExecutor {
         uint256 timestamp
     );
     event AdvanceSettled(uint256 indexed claimId, uint256 noteToVault, uint256 noteToWallet);
+    event AdvanceRepaymentFailed(uint256 indexed claimId, uint256 owedNote);
+    event SettlementRecordingFailed(uint256 indexed claimId, uint256 noteAmount);
 
     error NotExecutable(uint256 claimId);
     error NothingToRecover(address oldWallet);
@@ -106,12 +108,47 @@ contract RebindExecutor {
     {
         if (address(vault) == address(0)) return 0;
 
-        toVault = vault.repaymentDue(claimId);
-        if (toVault == 0) return 0;
-        if (toVault > amount) toVault = amount;
+        uint256 due = vault.repaymentDue(claimId);
+        if (due == 0) return 0;
 
-        token.recoveryTransfer(oldWallet, address(vault), toVault);
-        vault.settle(claimId, toVault);
+        toVault = due > amount ? amount : due;
+
+        bool success = false;
+
+        // a. try recoveryTransfer(oldWallet, address(vault), toVault)
+        try token.recoveryTransfer(oldWallet, address(vault), toVault) {
+            success = true;
+        } catch {
+            // b. on failure, if vault.fallbackReceiver() != address(0), try fallback
+            address fallbackRec = vault.fallbackReceiver();
+            if (fallbackRec != address(0)) {
+                try token.recoveryTransfer(oldWallet, fallbackRec, toVault) {
+                    success = true;
+                } catch {}
+            }
+        }
+
+        if (success) {
+            // d. on success (a or b): call vault.settle(claimId, toVault) as today, return toVault.
+            try vault.settle(claimId, toVault) {
+                // settled successfully
+            } catch {
+                // Settle failed despite successful transfer - emit SettlementRecordingFailed
+                emit SettlementRecordingFailed(claimId, toVault);
+            }
+            return toVault;
+        } else {
+            // c. if both fail (or fallback is unset):
+            // Emit AdvanceRepaymentFailed unconditionally from the executor
+            emit AdvanceRepaymentFailed(claimId, due);
+
+            // Try to call vault.recordRepaymentFailure
+            try vault.recordRepaymentFailure(claimId, "recovery transfer reverted for both vault and fallback receiver") {
+                // recorded successfully
+            } catch {}
+
+            return 0;
+        }
     }
 
     /// @notice What a given claim would move right now.
