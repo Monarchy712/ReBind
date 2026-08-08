@@ -60,13 +60,13 @@ contract BindingRegistry is AccessControl {
     event WalletRevoked(address indexed wallet, string reason);
     event WalletRestored(address indexed wallet);
     event RecoveryQueueSet(address indexed recoveryQueue);
-    error GuardianCannotBeAttestor(address guardian);
-    error GuardianCannotBeWallet(address guardian);
-    error GuardianMismatch(address expected, address supplied);
 
     error AlreadyBound(address wallet);
     error NotBound(address wallet);
     error MissingGuardian();
+    error GuardianCannotBeAttestor(address guardian);
+    error GuardianCannotBeWallet(address guardian);
+    error GuardianMismatch(address expected, address supplied);
     error ZeroAddress();
     error RecoveryQueueAlreadySet();
 
@@ -120,8 +120,9 @@ contract BindingRegistry is AccessControl {
         // party.
         if (guardian == wallet) revert GuardianCannotBeWallet(guardian);
 
-        // Guardian is set once per identity and is immutable through this path.
-        // See "guardian immutability" fix below.
+        // The guardian is pinned by the first wallet bound to an identity. Later
+        // wallets on the same identity must name that same guardian, so binding a
+        // second wallet cannot quietly hand the co-signing seat to someone else.
         address existingGuardian = guardianOf[identityCommitment];
         if (existingGuardian == address(0)) {
             guardianOf[identityCommitment] = guardian;

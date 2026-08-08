@@ -68,7 +68,9 @@ contract RecoveryQueue is EIP712, AccessControl {
     bytes32 private constant CLAIM_TYPEHASH = keccak256(
         "RecoveryClaim(bytes32 personId,address oldWallet,address newWallet,uint256 nonce,uint256 deadline)"
     );
-    
+
+    // A separate typehash, so the attestor's signature over a claim is not also
+    // a valid guardian co-signature for it.
     bytes32 private constant GUARDIAN_CLAIM_TYPEHASH = keccak256(
         "GuardianRecoveryClaim(bytes32 personId,address oldWallet,address newWallet,uint256 nonce,uint256 deadline)"
     );
