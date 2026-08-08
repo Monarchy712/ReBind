@@ -48,9 +48,49 @@ const noAdvances = (res) =>
   res.status(404).json({ ok: false, error: "This deployment has no bridge advance vault." });
 const mirrorFreezeToCleanverse = process.env.CV_FREEZE_PER_WALLET === "true";
 
+/**
+ * Confirms deployments.json describes the chain we are actually pointed at.
+ *
+ * Without this, a stale deployments.json (a restarted Hardhat node, a deploy to
+ * one network while the backend reads another) starts a healthy-looking server
+ * whose every route fails at request time with `could not decode result data
+ * (value="0x")`. That reads as an ABI bug and is really a wiring mistake, so
+ * catch it at boot where the fix is obvious.
+ */
+async function assertDeploymentMatchesChain(net) {
+  if (Number(net.chainId) !== D.chainId) {
+    throw new Error(
+      `deployments.json was written on chainId ${D.chainId} (${D.network}) but ${RPC_URL} is ` +
+      `chainId ${net.chainId}.\n` +
+      (LOCAL_MODE
+        ? `Redeploy against the local node:  npm run deploy:local`
+        : `Either start in local mode (npm run server:local) or redeploy:  npm run deploy`)
+    );
+  }
+
+  const contracts = { registry: D.registry, token: D.token, queue: D.queue, executor: D.executor };
+  if (D.vault) contracts.vault = D.vault;
+  if (D.stable) contracts.stable = D.stable;
+
+  const missing = [];
+  for (const [name, addr] of Object.entries(contracts)) {
+    if ((await provider.getCode(addr)) === "0x") missing.push(`${name} (${addr})`);
+  }
+  if (missing.length) {
+    throw new Error(
+      `No contract code at: ${missing.join(", ")}.\n` +
+      `deployments.json is from ${D.deployedAt} and no longer matches this chain — ` +
+      `${LOCAL_MODE ? "the node was probably restarted. Re-run:  npm run fund:local && npm run deploy:local"
+                    : "redeploy:  npm run deploy"}`
+    );
+  }
+}
+
 let attestor;
 (async () => {
   const net = await provider.getNetwork();
+  await assertDeploymentMatchesChain(net);
+
   attestor = new Attestor({
     privateKey: normalizePrivateKey(process.env.ATTESTOR_PK),
     queueAddress: D.queue,
@@ -79,7 +119,12 @@ let attestor;
   } else {
     console.warn("  guardian (none) — /api/claim will require a guardianSignature in the request body");
   }
-})();
+})().catch((e) => {
+  // These are setup errors with a stated fix, not crashes. Print the fix, not a
+  // stack trace, and refuse to listen rather than serve a broken backend.
+  console.error(`\nRebind backend cannot start:\n\n${e.message}\n`);
+  process.exit(1);
+});
 
 const ok = (res, data) => res.json({ ok: true, ...data });
 
