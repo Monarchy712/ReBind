@@ -356,7 +356,32 @@ app.post("/api/advance/draw", async (req, res) => {
     }
 
     const id = Number(req.body.claimId);
-    const tx = await vault.connect(signer).draw(id);
+
+    // Use the gasless path: the borrower signs, the issuer key relays. A wallet
+    // in the middle of recovering an asset may well hold no gas, so this is the
+    // realistic flow rather than a convenience.
+    const deadline = Math.floor(Date.now() / 1000) + 3600;
+    const nonce = await vault.advanceNonces(signer.address);
+    const net = await provider.getNetwork();
+    const authorization = await signer.signTypedData(
+      {
+        name: "RebindAdvance",
+        version: "1",
+        chainId: Number(net.chainId),
+        verifyingContract: D.vault,
+      },
+      {
+        AdvanceAuthorization: [
+          { name: "claimId", type: "uint256" },
+          { name: "borrower", type: "address" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+        ],
+      },
+      { claimId: id, borrower: signer.address, nonce, deadline }
+    );
+
+    const tx = await vault.drawWithAuthorization(id, deadline, authorization);
     await tx.wait();
 
     const stableDecimals = Number(await stable.decimals());

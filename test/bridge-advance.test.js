@@ -249,6 +249,141 @@ describe("Bridge advance", function () {
     });
   });
 
+  // ------------------------------------------- drawing without holding gas
+
+  describe("gasless draw", function () {
+    let id;
+
+    const authorize = async (signer, { claimId, borrower, nonce, deadline }) =>
+      signer.signTypedData(
+        {
+          name: "RebindAdvance",
+          version: "1",
+          chainId,
+          verifyingContract: await vault.getAddress(),
+        },
+        {
+          AdvanceAuthorization: [
+            { name: "claimId", type: "uint256" },
+            { name: "borrower", type: "address" },
+            { name: "nonce", type: "uint256" },
+            { name: "deadline", type: "uint256" },
+          ],
+        },
+        { claimId, borrower, nonce, deadline }
+      );
+
+    const auth = async (signer, overrides = {}) => {
+      const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+      const payload = {
+        claimId: id,
+        borrower: aliceNew.address,
+        nonce: Number(await vault.advanceNonces(aliceNew.address)),
+        deadline,
+        ...overrides,
+      };
+      return { payload, sig: await authorize(signer, payload) };
+    };
+
+    beforeEach(async function () {
+      id = await openClaim();
+      await queue.connect(issuer).commit(id);
+    });
+
+    it("THE POINT: a third party submits, the borrower is paid", async function () {
+      const { payload, sig } = await auth(aliceNew);
+
+      // outsider pays the gas; aliceNew never sends a transaction.
+      await vault.connect(outsider).drawWithAuthorization(id, payload.deadline, sig);
+
+      expect(await stable.balanceOf(aliceNew.address)).to.equal(usd(4000));
+      expect(await stable.balanceOf(outsider.address)).to.equal(0);
+    });
+
+    it("refuses a signature from anyone but the borrower", async function () {
+      const { payload, sig } = await auth(outsider);
+      await expect(vault.connect(outsider).drawWithAuthorization(id, payload.deadline, sig))
+        .to.be.revertedWithCustomError(vault, "BadAuthorization");
+    });
+
+    it("REPLAY: the same authorisation cannot be used twice", async function () {
+      const { payload, sig } = await auth(aliceNew);
+      await vault.connect(outsider).drawWithAuthorization(id, payload.deadline, sig);
+
+      await expect(vault.connect(outsider).drawWithAuthorization(id, payload.deadline, sig))
+        .to.be.revertedWithCustomError(vault, "BadAuthorization");
+    });
+
+    it("refuses an expired authorisation", async function () {
+      const past = (await ethers.provider.getBlock("latest")).timestamp - 1;
+      const { sig } = await auth(aliceNew, { deadline: past });
+
+      await expect(vault.connect(outsider).drawWithAuthorization(id, past, sig))
+        .to.be.revertedWithCustomError(vault, "AuthorizationExpired");
+    });
+
+    it("is bound to this vault, so a signature cannot be replayed elsewhere", async function () {
+      const other = await (await ethers.getContractFactory("BridgeAdvanceVault")).deploy(
+        await queue.getAddress(), await token.getAddress(), await stable.getAddress(),
+        await oracle.getAddress(), admin.address, LTV_BPS, FEE_BPS
+      );
+      const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+      const sig = await aliceNew.signTypedData(
+        { name: "RebindAdvance", version: "1", chainId, verifyingContract: await other.getAddress() },
+        {
+          AdvanceAuthorization: [
+            { name: "claimId", type: "uint256" },
+            { name: "borrower", type: "address" },
+            { name: "nonce", type: "uint256" },
+            { name: "deadline", type: "uint256" },
+          ],
+        },
+        { claimId: id, borrower: aliceNew.address, nonce: 0, deadline }
+      );
+
+      await expect(vault.connect(outsider).drawWithAuthorization(id, deadline, sig))
+        .to.be.revertedWithCustomError(vault, "BadAuthorization");
+    });
+
+  });
+
+  describe("gasless draw against an ineligible claim", function () {
+    const authorize = async (signer, payload) =>
+      signer.signTypedData(
+        {
+          name: "RebindAdvance",
+          version: "1",
+          chainId,
+          verifyingContract: await vault.getAddress(),
+        },
+        {
+          AdvanceAuthorization: [
+            { name: "claimId", type: "uint256" },
+            { name: "borrower", type: "address" },
+            { name: "nonce", type: "uint256" },
+            { name: "deadline", type: "uint256" },
+          ],
+        },
+        payload
+      );
+
+    it("a valid authorisation is still not a way around commitment", async function () {
+      // Opened, never committed — so the issuer could still cancel it, and the
+      // vault must refuse no matter who submits or how well-signed it is.
+      const id = await openClaim();
+      const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+      const sig = await authorize(aliceNew, {
+        claimId: id,
+        borrower: aliceNew.address,
+        nonce: Number(await vault.advanceNonces(aliceNew.address)),
+        deadline,
+      });
+
+      await expect(vault.connect(outsider).drawWithAuthorization(id, deadline, sig))
+        .to.be.revertedWithCustomError(vault, "ClaimNotCommitted");
+    });
+  });
+
   // ------------------------------------------------------------- settlement
 
   describe("settlement", function () {

@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "./RecoveryQueue.sol";
 import "./RebindableRWA.sol";
 import "./IAdvanceOracle.sol";
@@ -60,10 +62,15 @@ import "./IAdvanceOracle.sol";
  *      A-Pass binding or it cannot receive repayment at all. Losing that
  *      binding would strand every outstanding advance.
  */
-contract BridgeAdvanceVault is AccessControl, ReentrancyGuard {
+contract BridgeAdvanceVault is AccessControl, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
+    using ECDSA for bytes32;
 
     bytes32 public constant TREASURY_ROLE = keccak256("TREASURY_ROLE");
+
+    bytes32 private constant AUTH_TYPEHASH = keccak256(
+        "AdvanceAuthorization(uint256 claimId,address borrower,uint256 nonce,uint256 deadline)"
+    );
 
     uint16 public constant BPS = 10_000;
 
@@ -91,6 +98,9 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard {
     /// claimId => advance
     mapping(uint256 => Advance) private _advances;
 
+    /// borrower => nonce, for authorisation replay protection
+    mapping(address => uint256) public advanceNonces;
+
     uint256 public totalPrincipalOutstanding;
 
     event AdvanceDrawn(
@@ -116,6 +126,8 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard {
     error OnlyExecutor();
     error NoAdvance(uint256 claimId);
     error BadTerms();
+    error AuthorizationExpired();
+    error BadAuthorization(address recovered);
 
     constructor(
         address queue_,
@@ -125,7 +137,7 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard {
         address admin_,
         uint16 ltvBps_,
         uint16 feeBps_
-    ) {
+    ) EIP712("RebindAdvance", "1") {
         if (
             queue_ == address(0) || note_ == address(0) || stable_ == address(0)
                 || oracle_ == address(0) || admin_ == address(0)
@@ -233,13 +245,55 @@ contract BridgeAdvanceVault is AccessControl, ReentrancyGuard {
      *      be intercepted at settlement.
      */
     function draw(uint256 claimId) external nonReentrant returns (uint256 principalStable) {
+        RecoveryQueue.Claim memory c = queue.getClaim(claimId);
+        if (msg.sender != c.newWallet) revert NotBorrower(msg.sender, c.newWallet);
+        return _draw(claimId, c);
+    }
+
+    /**
+     * @notice Draw on behalf of a borrower who signed an authorisation.
+     *
+     * @dev The wallet recovering an asset may hold no gas — that is a normal
+     *      consequence of the situation it is in — so openClaim already lets
+     *      anyone submit on a claimant's behalf. This mirrors that: consent is
+     *      the borrower's EIP-712 signature, not the transaction sender.
+     *
+     *      Proceeds still go to the claim's new wallet, so a relayer gains
+     *      nothing by submitting. The nonce and deadline stop an old
+     *      authorisation being replayed after the borrower changed their mind.
+     */
+    function drawWithAuthorization(uint256 claimId, uint256 deadline, bytes calldata signature)
+        external
+        nonReentrant
+        returns (uint256 principalStable)
+    {
+        if (block.timestamp > deadline) revert AuthorizationExpired();
+
+        RecoveryQueue.Claim memory c = queue.getClaim(claimId);
+
+        uint256 nonce = advanceNonces[c.newWallet]++;
+        bytes32 structHash = keccak256(
+            abi.encode(AUTH_TYPEHASH, claimId, c.newWallet, nonce, deadline)
+        );
+        address recovered = _hashTypedDataV4(structHash).recover(signature);
+        if (recovered != c.newWallet) revert BadAuthorization(recovered);
+
+        return _draw(claimId, c);
+    }
+
+    /// @notice Exposed so a client can build the exact EIP-712 payload.
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
+    }
+
+    function _draw(uint256 claimId, RecoveryQueue.Claim memory c)
+        private
+        returns (uint256 principalStable)
+    {
         if (!queue.isCommitted(claimId)) revert ClaimNotCommitted(claimId);
 
         Advance storage a = _advances[claimId];
         if (a.drawn) revert AlreadyDrawn(claimId);
-
-        RecoveryQueue.Claim memory c = queue.getClaim(claimId);
-        if (msg.sender != c.newWallet) revert NotBorrower(msg.sender, c.newWallet);
 
         uint256 dueNote;
         (principalStable, dueNote) = quote(claimId);
