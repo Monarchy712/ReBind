@@ -1,0 +1,52 @@
+/* =============================================================== fonts.css
+   Three self-hosted variable faces, all SIL Open Font License 1.1:
+
+     Space Grotesk  display   — the voice. Tight, slightly mechanical.
+     Geist          body      — neutral, disappears at 14px.
+     JetBrains Mono labels    — the bracketed micro-type.
+
+   Self-hosted rather than CDN-linked on purpose: this app is routinely
+   demoed against a local Hardhat node on a laptop with no network, and a
+   headline that silently falls back to a system face is exactly the failure
+   that made the type look accidental before.
+
+   font-display:swap so text is never invisible while a file loads.
+   ====================================================================== */
+
+@font-face{
+  font-family:"Space Grotesk";
+  src:url("/fonts/SpaceGrotesk-Variable.woff2") format("woff2-variations"),
+      url("/fonts/SpaceGrotesk-Variable.woff2") format("woff2");
+  font-weight:300 700;
+  font-style:normal;
+  font-display:swap;
+}
+
+@font-face{
+  font-family:"Geist";
+  src:url("/fonts/Geist-Variable.woff2") format("woff2-variations"),
+      url("/fonts/Geist-Variable.woff2") format("woff2");
+  font-weight:100 900;
+  font-style:normal;
+  font-display:swap;
+}
+
+@font-face{
+  font-family:"JetBrains Mono";
+  src:url("/fonts/JetBrainsMono-Variable.woff2") format("woff2-variations"),
+      url("/fonts/JetBrainsMono-Variable.woff2") format("woff2");
+  font-weight:100 800;
+  font-style:normal;
+  font-display:swap;
+}
+
+/* Fallback metric matching, so the swap does not shift every line of body
+   copy when the real file lands. */
+@font-face{
+  font-family:"Geist Fallback";
+  src:local("Noto Sans"),local("Helvetica Neue"),local("Arial");
+  size-adjust:96%;
+  ascent-override:92%;
+  descent-override:24%;
+  line-gap-override:0%;
+}

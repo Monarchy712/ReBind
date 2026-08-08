@@ -15,7 +15,10 @@
     "server:local": "DEMO_MODE=local node backend/server.js",
     "register": "node scripts/register-atoken.js",
     "freeze-test": "node scripts/freeze-scope-test.js",
-    "server": "node backend/server.js"
+    "server": "node backend/server.js",
+    "web": "npm --prefix frontend run dev",
+    "web:build": "npm --prefix frontend run build",
+    "web:install": "npm --prefix frontend install"
   },
   "keywords": [],
   "author": "",
