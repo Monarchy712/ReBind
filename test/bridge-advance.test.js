@@ -37,20 +37,29 @@ async function signClaim(attestor, queueAddr, chainId, { personId, oldWallet, ne
 }
 
 describe("Bridge advance", function () {
-  let admin, attestor, issuer, alice, aliceNew, outsider;
+  let admin, attestor, issuer, alice, aliceNew, outsider, guardian;
   let registry, token, queue, executor, vault, stable, oracle;
-  let ALICE_ID, VAULT_ID, chainId;
+  let ALICE_ID, VAULT_ID, VAULT_GUARDIAN, chainId;
 
+  /**
+   * Opening a claim needs the attestor's attestation AND the nominated
+   * guardian's co-signature over the same payload — the fourth defence layer,
+   * so a compromised attestor key alone cannot forge a claim.
+   */
   const openClaim = async () => {
     const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
-    const sig = await signClaim(attestor, await queue.getAddress(), chainId, {
+    const payload = {
       personId: ALICE_ID,
       oldWallet: alice.address,
       newWallet: aliceNew.address,
       nonce: Number(await queue.nonces(aliceNew.address)),
       deadline,
-    });
-    await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig);
+    };
+    const queueAddr = await queue.getAddress();
+    const sig = await signClaim(attestor, queueAddr, chainId, payload);
+    const guardianSig = await signClaim(guardian, queueAddr, chainId, payload);
+
+    await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, guardianSig);
     return Number(await queue.claimCount()) - 1;
   };
 
@@ -60,11 +69,14 @@ describe("Bridge advance", function () {
   };
 
   beforeEach(async function () {
-    [admin, attestor, issuer, alice, aliceNew, outsider] = await ethers.getSigners();
+    [admin, attestor, issuer, alice, aliceNew, outsider, guardian] = await ethers.getSigners();
     chainId = Number((await ethers.provider.getNetwork()).chainId);
 
     ALICE_ID = ethers.keccak256(ethers.toUtf8Bytes("ALICECUST0001"));
     VAULT_ID = ethers.keccak256(ethers.toUtf8Bytes("REBIND_BRIDGE_VAULT_INSTITUTION"));
+    // The vault is an institution, not a person, but every binding needs a
+    // guardian. It never opens claims, so this address is never used to sign.
+    VAULT_GUARDIAN = admin.address;
 
     registry = await (await ethers.getContractFactory("BindingRegistry"))
       .deploy(admin.address, attestor.address);
@@ -100,11 +112,11 @@ describe("Bridge advance", function () {
     await registry.connect(admin).grantRole(await registry.RECOVERY_ROLE(), await queue.getAddress());
     await vault.connect(admin).setExecutor(await executor.getAddress());
 
-    await registry.connect(attestor).bindWallet(ALICE_ID, alice.address);
-    await registry.connect(attestor).bindWallet(ALICE_ID, aliceNew.address);
+    await registry.connect(attestor).bindWallet(ALICE_ID, alice.address, guardian.address);
+    await registry.connect(attestor).bindWallet(ALICE_ID, aliceNew.address, guardian.address);
     // The vault must itself be a bound wallet or the restricted note will not
     // let it receive repayment.
-    await registry.connect(attestor).bindWallet(VAULT_ID, await vault.getAddress());
+    await registry.connect(attestor).bindWallet(VAULT_ID, await vault.getAddress(), VAULT_GUARDIAN);
 
     await token.connect(admin).mint(alice.address, note(5000));
 
@@ -223,10 +235,17 @@ describe("Bridge advance", function () {
     });
 
     it("quote() returns zero for an ineligible claim instead of reverting", async function () {
-      const fresh = await openClaim();
-      const [principal, due] = await vault.quote(fresh);
-      expect(principal).to.equal(0);
-      expect(due).to.equal(0);
+      // A UI asks about whatever claim it is showing, so quote() must answer
+      // for claims that do not exist and for ones already drawn against,
+      // rather than reverting and forcing every caller to special-case them.
+      const [p1, d1] = await vault.quote(9999);
+      expect(p1).to.equal(0);
+      expect(d1).to.equal(0);
+
+      await vault.connect(aliceNew).draw(id);
+      const [p2, d2] = await vault.quote(id);
+      expect(p2).to.equal(0);
+      expect(d2).to.equal(0);
     });
   });
 

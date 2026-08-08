@@ -135,7 +135,10 @@ async function main() {
       await (await registry.grantRole(attestorRole, deployer.address)).wait();
     }
     const institutionId = ethers.keccak256(ethers.toUtf8Bytes("REBIND_BRIDGE_VAULT_INSTITUTION"));
-    await (await registry.bindWallet(institutionId, vaultAddr)).wait();
+    // Every binding needs a guardian. The vault is an institution that never
+    // opens a recovery claim, so its guardian is never called on to co-sign;
+    // it is the issuer purely so the field is answerable by someone real.
+    await (await registry.bindWallet(institutionId, vaultAddr, deployer.address)).wait();
     if (!hadRole) {
       await (await registry.renounceRole(attestorRole, deployer.address)).wait();
     }

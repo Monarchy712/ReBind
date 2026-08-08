@@ -170,6 +170,18 @@
   .card.foe .ribbon{display:block}
   .card.compromised .ribbon{color:var(--danger)}
 
+  /* ------------------------------------------------------------ guardian */
+  .guardian{
+    display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+    border:1px solid var(--rule);border-top:0;background:var(--card);
+    padding:13px 24px;margin-top:-34px;margin-bottom:34px;
+  }
+  .guardian .glabel{
+    font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+  }
+  .guardian .gaddr{font-family:var(--mono);font-size:11px;color:var(--ink-2);word-break:break-all}
+  .guardian .gnote{font-size:12.5px;color:var(--muted);flex:1 1 320px}
+
   /* ------------------------------------------------------------- stepper */
   .rail{display:grid;grid-template-columns:repeat(6,1fr);gap:0;margin-bottom:34px}
   .rstep{padding-top:11px;border-top:2px solid var(--rule);padding-right:14px}
@@ -399,6 +411,14 @@
         <div class="bal zero" id="bX">0<small>Note</small></div>
         <div class="ribbon" id="ribX">No A-Pass. The token refuses it as a destination.</div>
       </div>
+    </div>
+
+    <!-- The guardian holds no assets, so it is a note on the ledger rather
+         than a fourth balance card. -->
+    <div class="guardian" id="guardianRow">
+      <span class="glabel">Guardian co-signer</span>
+      <span class="gaddr" id="aG">—</span>
+      <span class="gnote">Nominated at registration. Must co-sign any recovery claim, so a compromised attestor key is not enough on its own.</span>
     </div>
 
     <div class="rail" id="rail"></div>
@@ -657,9 +677,14 @@ async function run(action){
   try{
     if(action==="register"){
       log("registering A-Pass for wallet A…","l-info");
-      let r=await post("/api/register",{customerId:CID,address:W.A});
+      // The guardian is nominated at registration and is required to co-sign
+      // any future recovery claim, so a compromised attestor key is not enough
+      // on its own to forge one.
+      const guardianAddress=W.G;
+      let r=await post("/api/register",{customerId:CID,address:W.A,guardianAddress});
+      log(`guardian nominated · ${guardianAddress}`,"l-dim");
       log(`wallet A verified · A-Pass under ${CID}`,"l-ok");
-      r=await post("/api/register",{customerId:CID,address:W.B,override:true});
+      r=await post("/api/register",{customerId:CID,address:W.B,override:true,guardianAddress});
       log(`wallet B bound to the SAME customerId${r.cleanverse?.cvRecordId?` · record ${r.cleanverse.cvRecordId}`:""}`,"l-ok");
       r=await post("/api/mint",{to:W.A,amount:250});
       log(`minted 250 NOTE to wallet A · ${short(r.txHash)}`,"l-ok");
@@ -683,6 +708,7 @@ async function run(action){
       const r=await post("/api/claim",{customerId:CID,oldWallet:W.A,newWallet:W.B});
       claimId=r.claimId; rejected=false; windowElapsed=false; totalWindow=null;
       log("equivalence confirmed · both wallets → one customerId","l-ok");
+      log("guardian co-signature collected and verified against guardianOf","l-ok");
       log(`claim #${claimId} opened · wallet A FROZEN · ${short(r.txHash)}`,"l-ok");
       document.getElementById("claimchip").textContent=`claim #${claimId}`;
       step=4;
@@ -758,12 +784,15 @@ function startTimer(){
 /* ---------- live wallet state ---------- */
 async function refresh(){
   if(!W.A) return;
-  const q=Object.values(W).join(",");
+  const q=[W.A,W.B,W.X].filter(Boolean).join(",");
   const r=await getJSON(`/api/state?wallets=${q}`);
   if(!r) return;
   if(r.contracts) document.getElementById("chain").textContent=`chain ${r.contracts.chainId} · token ${r.contracts.token.slice(0,10)}…`;
+  // Only the three asset-holding wallets have cards. The guardian is a
+  // co-signer, not a holder, so it is shown as a line below the ledger.
   const map={A:["aA","bA","pA","cardA"],B:["aB","bB","pB","cardB"],X:["aX","bX","pX","cardX"]};
-  for(const [k,addr] of Object.entries(W)){
+  for(const k of Object.keys(map)){
+    const addr=W[k]; if(!addr) continue;
     const s=r.wallets?.[addr]||{}; const [aid,bid,pid,cid]=map[k];
     document.getElementById(aid).textContent=addr;
     const bal=parseFloat(s.balance||0);
@@ -821,6 +850,8 @@ async function boot(){
   }
 
   W=cfg.wallets;
+  if(W.G) document.getElementById("aG").textContent=W.G;
+  else document.getElementById("guardianRow").style.display="none";
   cureWindow=cfg.cureWindow;
   CID=sessionCustomerId(cfg.token);
   document.getElementById("footMode").textContent=cfg.localMode?"local demo mode":`chain ${cfg.chainId}`;
