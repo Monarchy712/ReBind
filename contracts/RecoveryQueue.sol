@@ -16,21 +16,26 @@ import "./BindingRegistry.sol";
  * -----------------------------------------------------------
  * Q: "What stops an attacker filing a fake claim and stealing the asset?"
  *
- * Three independent layers:
+ * Four independent layers:
  *
  *   1. ATTESTATION. Opening a claim requires an EIP-712 signature from the
  *      attestor, who only signs after confirming via query_apass_list that
  *      both wallets share one Cleanverse customerId. An attacker holding a
  *      stolen WALLET does not hold the victim's bank-verified IDENTITY.
  *
- *   2. CHALLENGE WINDOW. Opening a claim immediately revokes the old binding,
+ *   2. GUARDIAN CO-SIGN. Opening a claim also requires a co-signature from
+ *      the person's nominated guardian wallet (recorded on-chain at registration).
+ *      Even if the attestor private key is compromised, an attacker cannot forge
+ *      a claim without also compromising the independent guardian's key.
+ *
+ *   3. CHALLENGE WINDOW. Opening a claim immediately revokes the old binding,
  *      so a compromised key cannot drain assets while the claim is reviewed.
  *      Only an issuer reviewer may reject a claim; a thief who controls the
  *      old key must not receive a veto over recovery.
  *
- *   3. ISSUER APPROVAL. A human at the issuer must countersign.
+ *   4. ISSUER APPROVAL. A human at the issuer must countersign.
  *
- * To defeat all three you need the wallet AND the identity AND the issuer.
+ * To defeat all four you need the wallet AND the attestor key AND the guardian key AND the issuer.
  *
  * REPLAY PROTECTION
  * -----------------
@@ -111,6 +116,7 @@ contract RecoveryQueue is EIP712, AccessControl {
     event ExecutorSet(address indexed executor);
 
     error BadAttestation(address recovered);
+    error BadGuardianAttestation(address recovered);
     error AttestationExpired();
     error NotSamePerson(address oldWallet, address newWallet);
     error NewWalletNotActive(address newWallet);
@@ -177,15 +183,16 @@ contract RecoveryQueue is EIP712, AccessControl {
 
     /**
      * @notice Open a recovery claim. Anyone may submit the transaction (the
-     *         claimant may have no gas), but only with a valid attestor
-     *         signature proving the two wallets share one customerId.
+     *         claimant may have no gas), but only with valid attestor AND guardian
+     *         signatures proving identity equivalence and owner consent.
      */
     function openClaim(
         bytes32 personId,
         address oldWallet,
         address newWallet,
         uint256 deadline,
-        bytes calldata signature
+        bytes calldata signature,
+        bytes calldata guardianSignature
     ) external returns (uint256 claimId) {
         if (block.timestamp > deadline) revert AttestationExpired();
         if (oldWallet == newWallet) revert SameWallet(oldWallet);
@@ -201,12 +208,15 @@ contract RecoveryQueue is EIP712, AccessControl {
         // Recovering into a dead wallet would be pointless and unsafe.
         if (!registry.isActive(newWallet)) revert NewWalletNotActive(newWallet);
 
-        uint256 nonce = nonces[newWallet]++;
         bytes32 structHash = keccak256(
-            abi.encode(CLAIM_TYPEHASH, personId, oldWallet, newWallet, nonce, deadline)
+            abi.encode(CLAIM_TYPEHASH, personId, oldWallet, newWallet, nonces[newWallet]++, deadline)
         );
-        address recovered = _hashTypedDataV4(structHash).recover(signature);
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address recovered = digest.recover(signature);
         if (recovered != attestor) revert BadAttestation(recovered);
+
+        recovered = digest.recover(guardianSignature);
+        if (recovered != registry.guardianOf(personId)) revert BadGuardianAttestation(recovered);
 
         uint64 execAt = uint64(block.timestamp) + cureWindow;
         _claims.push(

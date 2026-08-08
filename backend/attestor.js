@@ -132,6 +132,46 @@ class Attestor {
 
     return { personId, oldWallet, newWallet, nonce, deadline, signature, proof };
   }
+
+  /**
+   * Co-sign a recovery claim using the guardian's independently-held private key.
+   * Uses the identical EIP-712 domain and typehash as the attestor signature.
+   */
+  async signGuardianClaim({ privateKey, customerId, personId: givenPersonId, oldWallet, newWallet, nonce, ttlSeconds = 3600, deadline: givenDeadline }) {
+    const guardianSigner = new ethers.Wallet(normalizePrivateKey(privateKey));
+    const personId = givenPersonId || personIdOf(customerId);
+    const deadline = givenDeadline !== undefined ? givenDeadline : Math.floor(Date.now() / 1000) + ttlSeconds;
+
+    const signature = await guardianSigner.signTypedData(
+      this.domain(),
+      EIP712_TYPES,
+      { personId, oldWallet, newWallet, nonce, deadline }
+    );
+
+    return { personId, oldWallet, newWallet, nonce, deadline, signature, guardian: guardianSigner.address };
+  }
 }
 
-module.exports = { Attestor, personIdOf, EIP712_TYPES };
+/**
+ * Sign a guardian claim directly with a dedicated private key.
+ */
+async function signGuardianClaim({ privateKey, queueAddress, chainId, customerId, personId: givenPersonId, oldWallet, newWallet, nonce, ttlSeconds = 3600, deadline: givenDeadline }) {
+  const guardianSigner = new ethers.Wallet(normalizePrivateKey(privateKey));
+  const personId = givenPersonId || (customerId ? personIdOf(customerId) : undefined);
+  const deadline = givenDeadline !== undefined ? givenDeadline : Math.floor(Date.now() / 1000) + ttlSeconds;
+  const domain = {
+    name: "Rebind",
+    version: "1",
+    chainId,
+    verifyingContract: queueAddress,
+  };
+  const signature = await guardianSigner.signTypedData(
+    domain,
+    EIP712_TYPES,
+    { personId, oldWallet, newWallet, nonce, deadline }
+  );
+  return { personId, oldWallet, newWallet, nonce, deadline, signature, guardian: guardianSigner.address };
+}
+
+module.exports = { Attestor, personIdOf, EIP712_TYPES, signGuardianClaim };
+

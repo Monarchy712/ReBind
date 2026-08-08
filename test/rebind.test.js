@@ -28,13 +28,36 @@ async function attest(queue, attestor, { personId, oldWallet, newWallet, nonce, 
   });
 }
 
+/** Build and sign the EIP-712 RecoveryClaim co-signature with the guardian's key. */
+async function signGuardian(queue, guardian, { personId, oldWallet, newWallet, nonce, deadline }) {
+  const net = await ethers.provider.getNetwork();
+  const domain = {
+    name: "Rebind",
+    version: "1",
+    chainId: net.chainId,
+    verifyingContract: await queue.getAddress(),
+  };
+  const types = {
+    RecoveryClaim: [
+      { name: "personId", type: "bytes32" },
+      { name: "oldWallet", type: "address" },
+      { name: "newWallet", type: "address" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+  };
+  return guardian.signTypedData(domain, types, {
+    personId, oldWallet, newWallet, nonce, deadline,
+  });
+}
+
 describe("Rebind", function () {
-  let admin, attestor, issuer, alice, aliceNew, bob, attacker, aliceOther; // added aliceOther
+  let admin, attestor, issuer, alice, aliceNew, bob, attacker, guardianAlice, guardianBob, aliceOther; // added aliceOther
   let registry, token, queue, executor;
   let ALICE_ID, BOB_ID;
 
   beforeEach(async function () {
-    [admin, attestor, issuer, alice, aliceNew, bob, attacker, aliceOther] = await ethers.getSigners(); // added aliceOther
+    [admin, attestor, issuer, alice, aliceNew, bob, attacker, aliceOther, guardianAlice, guardianBob] = await ethers.getSigners(); // added aliceOther
 
     ALICE_ID = ethers.keccak256(ethers.toUtf8Bytes("ALICECUST0001"));
     BOB_ID = ethers.keccak256(ethers.toUtf8Bytes("BOBCUST000001"));
@@ -56,10 +79,10 @@ describe("Rebind", function () {
     await queue.connect(admin).grantRole(await queue.ISSUER_ROLE(), issuer.address);
     await registry.connect(admin).grantRole(await registry.RECOVERY_ROLE(), await queue.getAddress());
 
-    // Alice holds two wallets under one identity. Bob holds one.
-    await registry.connect(attestor).bindWallet(ALICE_ID, alice.address);
-    await registry.connect(attestor).bindWallet(ALICE_ID, aliceNew.address);
-    await registry.connect(attestor).bindWallet(BOB_ID, bob.address);
+    // Alice holds two wallets under one identity with guardianAlice. Bob holds one with guardianBob.
+    await registry.connect(attestor).bindWallet(ALICE_ID, alice.address, guardianAlice.address);
+    await registry.connect(attestor).bindWallet(ALICE_ID, aliceNew.address, guardianAlice.address);
+    await registry.connect(attestor).bindWallet(BOB_ID, bob.address, guardianBob.address);
   });
 
   // ------------------------------------------------------------- registry
@@ -74,13 +97,25 @@ describe("Rebind", function () {
       expect(await registry.samePerson(attacker.address, attacker.address)).to.equal(false);
     });
 
+    it("registering a wallet WITHOUT a guardian address reverts with MissingGuardian", async function () {
+      const freshCust = ethers.keccak256(ethers.toUtf8Bytes("FRESHCUST123"));
+      await expect(
+        registry.connect(attestor).bindWallet(freshCust, attacker.address, ethers.ZeroAddress)
+      ).to.be.revertedWithCustomError(registry, "MissingGuardian");
+    });
+
+    it("registering WITH a valid guardian succeeds and guardianOf is correctly stored", async function () {
+      expect(await registry.guardianOf(ALICE_ID)).to.equal(guardianAlice.address);
+      expect(await registry.guardianOf(BOB_ID)).to.equal(guardianBob.address);
+    });
+
     it("refuses to rebind a wallet to a second person", async function () {
-      await expect(registry.connect(attestor).bindWallet(BOB_ID, alice.address))
+      await expect(registry.connect(attestor).bindWallet(BOB_ID, alice.address, guardianBob.address))
         .to.be.revertedWithCustomError(registry, "AlreadyBound");
     });
 
     it("only the attestor may write bindings", async function () {
-      await expect(registry.connect(attacker).bindWallet(ALICE_ID, attacker.address))
+      await expect(registry.connect(attacker).bindWallet(ALICE_ID, attacker.address, guardianAlice.address))
         .to.be.reverted;
     });
 
@@ -219,7 +254,11 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig))
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, gSig))
         .to.emit(queue, "ClaimOpened");
       expect(await queue.claimCount()).to.equal(1n);
       expect(await registry.revoked(alice.address)).to.equal(true);
@@ -230,8 +269,25 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig))
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, gSig))
         .to.be.revertedWithCustomError(queue, "BadAttestation");
+    });
+
+    it("opening a claim with the WRONG guardian's signature reverts with BadGuardianAttestation", async function () {
+      const sig = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      const badGuardianSig = await signGuardian(queue, attacker, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, badGuardianSig))
+        .to.be.revertedWithCustomError(queue, "BadGuardianAttestation");
     });
 
     it("rejects an expired attestation", async function () {
@@ -240,7 +296,11 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline: past,
       });
-      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, past, sig))
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline: past,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, past, sig, gSig))
         .to.be.revertedWithCustomError(queue, "AttestationExpired");
     });
 
@@ -249,18 +309,26 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: bob.address, nonce: 0, deadline,
       });
-      await expect(queue.openClaim(ALICE_ID, alice.address, bob.address, deadline, sig))
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: bob.address, nonce: 0, deadline,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, bob.address, deadline, sig, gSig))
         .to.be.revertedWithCustomError(queue, "NotSamePerson");
     });
 
     it("refuses to recover into an unverified wallet", async function () {
-      await registry.connect(attestor).bindWallet(ALICE_ID, attacker.address);
+      await registry.connect(attestor).bindWallet(ALICE_ID, attacker.address, guardianAlice.address);
       await registry.connect(attestor).revokeWallet(attacker.address, "bad");
       const sig = await attest(queue, attestor, {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: attacker.address, nonce: 0, deadline,
       });
-      await expect(queue.openClaim(ALICE_ID, alice.address, attacker.address, deadline, sig))
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: attacker.address, nonce: 0, deadline,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, attacker.address, deadline, sig, gSig))
         .to.be.revertedWithCustomError(queue, "NewWalletNotActive");
     });
 
@@ -269,10 +337,14 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig);
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, gSig);
       await queue.connect(issuer).cancel(0); // free the active-claim slot so this test isolates nonce replay
       // nonce is now 1, so the old signature no longer verifies
-      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig))
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, gSig))
         .to.be.revertedWithCustomError(queue, "BadAttestation");
     });
 
@@ -281,7 +353,11 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig);
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, gSig);
       await expect(queue.connect(alice).cancel(0)).to.be.reverted;
       await expect(queue.connect(issuer).cancel(0)).to.emit(queue, "ClaimCancelled");
       expect((await queue.getClaim(0)).cancelled).to.equal(true);
@@ -293,7 +369,11 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig);
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, gSig);
       await expect(queue.connect(attacker).cancel(0)).to.be.reverted;
     });
 
@@ -302,7 +382,11 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig);
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, gSig);
       await queue.connect(issuer).approve(0);
       expect(await queue.isExecutable(0)).to.equal(false);
       await time.increase(CURE + 1);
@@ -314,19 +398,35 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig);
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, gSig);
       await time.increase(CURE + 1);
       expect(await queue.isExecutable(0)).to.equal(false);
     });
 
     it("THE FIX: rejects a claim where oldWallet equals newWallet", async function () {
       const sig = await attest(queue, attestor, {
-        personId: ALICE_ID, oldWallet: alice.address,
-        newWallet: alice.address, nonce: 0, deadline,
-      });
-      await expect(queue.openClaim(ALICE_ID, alice.address, alice.address, deadline, sig))
-        .to.be.revertedWithCustomError(queue, "SameWallet")
-        .withArgs(alice.address);
+      personId: ALICE_ID,
+      oldWallet: alice.address,
+      newWallet: alice.address,
+      nonce: 0,
+      deadline,
+    });
+
+    const gSig = await signGuardian(queue, guardianAlice, {
+      personId: ALICE_ID,
+      oldWallet: alice.address,
+      newWallet: alice.address,
+      nonce: 0,
+      deadline,
+    });
+
+    await expect(
+      queue.openClaim(ALICE_ID, alice.address, alice.address, deadline, sig, gSig)
+    ).to.be.revertedWithCustomError(queue, "SameWallet").withArgs(alice.address);
     });
 
     it("never freezes the wallet when the same-wallet claim is rejected", async function () {
@@ -336,7 +436,13 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: alice.address, nonce: 0, deadline,
       });
-      await expect(queue.openClaim(ALICE_ID, alice.address, alice.address, deadline, sig))
+
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: alice.address, nonce: 0, deadline,
+      });
+
+      await expect(queue.openClaim(ALICE_ID, alice.address, alice.address, deadline, sig, gSig))
         .to.be.reverted;
       expect(await registry.revoked(alice.address)).to.equal(false);
       expect(await queue.claimCount()).to.equal(0n);
@@ -345,53 +451,83 @@ describe("Rebind", function () {
         it("THE FIX: a second, distinct, honestly-signed claim cannot open against an oldWallet that already has one live", async function () {
       // Alice legitimately controls a third wallet, so this attestation is
       // just as valid as the first one — it's not a forged or replayed signature.
-      await registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address);
+      await registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address, guardianAlice.address);
 
       const sigA = await attest(queue, attestor, {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigA);
+
+      const gSigA = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigA, gSigA);
 
       const sigB = await attest(queue, attestor, {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceOther.address, nonce: 0, deadline,
       });
+
+      const gSigB = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceOther.address, nonce: 0, deadline,
+      });
+
       // sigB is a fresh, valid, non-replayed signature — nonce replay
       // protection alone would let this through. The active-claim guard
       // is what actually stops it.
-      await expect(queue.openClaim(ALICE_ID, alice.address, aliceOther.address, deadline, sigB))
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceOther.address, deadline, sigB, gSigB))
         .to.be.revertedWithCustomError(queue, "ClaimAlreadyActive")
         .withArgs(alice.address, 0n);
     });
 
     it("does not block a second claim once the first is cancelled", async function () {
-      await registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address);
+      await registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address, guardianAlice.address);
 
       const sigA = await attest(queue, attestor, {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigA);
+
+      const gSigA = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigA, gSigA);
       await queue.connect(issuer).cancel(0);
 
       const sigB = await attest(queue, attestor, {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceOther.address, nonce: 0, deadline,
       });
-      await expect(queue.openClaim(ALICE_ID, alice.address, aliceOther.address, deadline, sigB))
+
+      const gSigB = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceOther.address, nonce: 0, deadline,
+      });
+
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceOther.address, deadline, sigB, gSigB))
         .to.emit(queue, "ClaimOpened");
     });
 
     it("does not block a second claim once the first is executed", async function () {
       await token.connect(admin).mint(alice.address, 10n * ONE);
-      await registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address);
+      await registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address, guardianAlice.address);
 
       const sigA = await attest(queue, attestor, {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigA);
+
+      const gSigA = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigA, gSigA);
       await queue.connect(issuer).approve(0);
       await time.increase(CURE + 1);
       await executor.execute(0);
@@ -403,7 +539,13 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceOther.address, nonce: 0, deadline,
       });
-      await expect(queue.openClaim(ALICE_ID, alice.address, aliceOther.address, deadline, sigB))
+
+      const gSigB = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceOther.address, nonce: 0, deadline,
+      });
+
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceOther.address, deadline, sigB, gSigB))
         .to.emit(queue, "ClaimOpened");
     });
 
@@ -412,16 +554,28 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigAlice);
 
-      await registry.connect(attestor).bindWallet(BOB_ID, aliceOther.address);
+      const gSigAlice = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigAlice, gSigAlice);
+
+      await registry.connect(attestor).bindWallet(BOB_ID, aliceOther.address, guardianBob.address);
       const sigBob = await attest(queue, attestor, {
         personId: BOB_ID, oldWallet: bob.address,
         newWallet: aliceOther.address, nonce: 0, deadline,
       });
+
+      const gSigBob = await signGuardian(queue, guardianBob, {
+        personId: BOB_ID, oldWallet: bob.address,
+        newWallet: aliceOther.address, nonce: 0, deadline,
+      });
+
       // Bob's claim is unrelated to Alice's oldWallet, so it must go through
       // even while Alice's claim is still active.
-      await expect(queue.openClaim(BOB_ID, bob.address, aliceOther.address, deadline, sigBob))
+      await expect(queue.openClaim(BOB_ID, bob.address, aliceOther.address, deadline, sigBob, gSigBob))
         .to.emit(queue, "ClaimOpened");
     });
   });
@@ -435,7 +589,11 @@ describe("Rebind", function () {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
-      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig);
+      const gSig = await signGuardian(queue, guardianAlice, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, gSig);
       await queue.connect(issuer).approve(0);
       return 0;
     }

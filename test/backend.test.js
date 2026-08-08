@@ -18,10 +18,8 @@ const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 process.env.CV_API_ID = "APPTESTID0000000000";
 process.env.CV_API_KEY = TEST_KEY;
 process.env.CV_BASE_URL = "https://uatapi.example.invalid/api/cooperate";
-process.env.IDENTITY_COMMITMENT_SALT = "test-salt-do-not-use-in-production";
-
 const cv = require("../backend/cleanverse");
-const { Attestor, personIdOf, EIP712_TYPES } = require("../backend/attestor");
+const { Attestor, personIdOf, EIP712_TYPES, signGuardianClaim } = require("../backend/attestor");
 
 /** Swap in a canned response for the next fetch, and capture what was sent. */
 function stubFetch(payload, { status = 200 } = {}) {
@@ -366,6 +364,96 @@ describe("Backend", function () {
       } catch (e) { err = e; }
       expect(err).to.exist;
       expect(err.message).to.match(/same address/i);
+    });
+  });
+
+  describe("Guardian — signing", function () {
+    const QUEUE = "0x" + "e".repeat(40);
+    const OLD = "0x" + "11".repeat(20);
+    const NEW = "0x" + "22".repeat(20);
+
+    it("signs with a dedicated guardian private key under the queue domain", async function () {
+      const guardianWallet = ethers.Wallet.createRandom();
+      const attestor = new Attestor({ privateKey: ethers.Wallet.createRandom().privateKey, queueAddress: QUEUE, chainId: 84532 });
+
+      const gRes = await attestor.signGuardianClaim({
+        privateKey: guardianWallet.privateKey,
+        customerId: "REBINDALICE001",
+        oldWallet: OLD,
+        newWallet: NEW,
+        nonce: 0,
+      });
+
+      expect(gRes.signature).to.match(/^0x[0-9a-f]{130}$/);
+      expect(gRes.guardian).to.equal(guardianWallet.address);
+
+      const recovered = ethers.verifyTypedData(
+        { name: "Rebind", version: "1", chainId: 84532, verifyingContract: QUEUE },
+        EIP712_TYPES,
+        { personId: gRes.personId, oldWallet: OLD, newWallet: NEW, nonce: 0, deadline: gRes.deadline },
+        gRes.signature
+      );
+      expect(recovered).to.equal(guardianWallet.address);
+    });
+
+    it("produces a signature that is distinct from the attestor's own signature", async function () {
+      const attestorWallet = ethers.Wallet.createRandom();
+      const guardianWallet = ethers.Wallet.createRandom();
+      const attestor = new Attestor({ privateKey: attestorWallet.privateKey, queueAddress: QUEUE, chainId: 84532 });
+
+      cv.walletsForCustomer = async () => [OLD.toLowerCase(), NEW.toLowerCase()];
+
+      const attSig = await attestor.signClaim({
+        customerId: "REBINDALICE001", oldWallet: OLD, newWallet: NEW, nonce: 0, ttlSeconds: 3600,
+      });
+      const gSig = await attestor.signGuardianClaim({
+        privateKey: guardianWallet.privateKey,
+        customerId: "REBINDALICE001",
+        oldWallet: OLD,
+        newWallet: NEW,
+        nonce: 0,
+        deadline: attSig.deadline,
+      });
+
+      expect(attSig.signature).to.not.equal(gSig.signature);
+
+      const recoveredAttestor = ethers.verifyTypedData(
+        { name: "Rebind", version: "1", chainId: 84532, verifyingContract: QUEUE },
+        EIP712_TYPES,
+        { personId: attSig.personId, oldWallet: OLD, newWallet: NEW, nonce: 0, deadline: attSig.deadline },
+        attSig.signature
+      );
+      const recoveredGuardian = ethers.verifyTypedData(
+        { name: "Rebind", version: "1", chainId: 84532, verifyingContract: QUEUE },
+        EIP712_TYPES,
+        { personId: gSig.personId, oldWallet: OLD, newWallet: NEW, nonce: 0, deadline: gSig.deadline },
+        gSig.signature
+      );
+
+      expect(recoveredAttestor).to.equal(attestorWallet.address);
+      expect(recoveredGuardian).to.equal(guardianWallet.address);
+      expect(recoveredAttestor).to.not.equal(recoveredGuardian);
+    });
+
+    it("signGuardianClaim helper function produces valid verifiable signature", async function () {
+      const guardianWallet = ethers.Wallet.createRandom();
+      const gRes = await signGuardianClaim({
+        privateKey: guardianWallet.privateKey,
+        queueAddress: QUEUE,
+        chainId: 84532,
+        customerId: "REBINDALICE001",
+        oldWallet: OLD,
+        newWallet: NEW,
+        nonce: 3,
+      });
+
+      const recovered = ethers.verifyTypedData(
+        { name: "Rebind", version: "1", chainId: 84532, verifyingContract: QUEUE },
+        EIP712_TYPES,
+        { personId: gRes.personId, oldWallet: OLD, newWallet: NEW, nonce: 3, deadline: gRes.deadline },
+        gRes.signature
+      );
+      expect(recovered).to.equal(guardianWallet.address);
     });
   });
 });

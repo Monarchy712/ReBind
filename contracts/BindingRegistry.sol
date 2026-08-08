@@ -46,6 +46,9 @@ contract BindingRegistry is AccessControl {
     /// wallet => opaque identity commitment (bytes32(0) means "never bound")
     mapping(address => bytes32) private _identityOf;
 
+    /// identity commitment => nominated guardian address (co-signs recovery claims)
+    mapping(bytes32 => address) public guardianOf;
+
     /// wallet => has this binding been revoked?
     mapping(address => bool) public revoked;
 
@@ -53,12 +56,14 @@ contract BindingRegistry is AccessControl {
     address public recoveryQueue;
 
     event WalletBound(address indexed wallet);
+    event GuardianSet(bytes32 indexed personId, address indexed guardian);
     event WalletRevoked(address indexed wallet, string reason);
     event WalletRestored(address indexed wallet);
     event RecoveryQueueSet(address indexed recoveryQueue);
 
     error AlreadyBound(address wallet);
     error NotBound(address wallet);
+    error MissingGuardian();
     error ZeroAddress();
     error RecoveryQueueAlreadySet();
 
@@ -89,21 +94,24 @@ contract BindingRegistry is AccessControl {
     // ---------------------------------------------------------------- writes
 
     /**
-     * @notice Bind a wallet to a person. Called after the backend has confirmed
-     *         via generate_apass that this wallet now carries an A-Pass under
+     * @notice Bind a wallet to a person and set their guardian. Called after the backend
+     *         has confirmed via generate_apass that this wallet now carries an A-Pass under
      *         the given customerId.
-     * @dev A wallet may belong to only one person, ever. A person may hold many
-     *      wallets — that one-to-many relationship is what makes recovery work.
+     * @dev A wallet may belong to only one person, ever. A non-zero guardian is strictly required;
+     *      the guardian must co-sign any future recovery claim for this identity.
      */
-    function bindWallet(bytes32 identityCommitment, address wallet)
+    function bindWallet(bytes32 identityCommitment, address wallet, address guardian)
         external
         onlyRole(ATTESTOR_ROLE)
     {
         if (wallet == address(0)) revert ZeroAddress();
+        if (guardian == address(0)) revert MissingGuardian();
         if (identityCommitment == bytes32(0) || _identityOf[wallet] != bytes32(0)) revert AlreadyBound(wallet);
 
         _identityOf[wallet] = identityCommitment;
+        guardianOf[identityCommitment] = guardian;
         emit WalletBound(wallet);
+        emit GuardianSet(identityCommitment, guardian);
     }
 
     /**
