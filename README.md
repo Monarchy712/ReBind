@@ -51,10 +51,11 @@ yourself. That seam is stated openly rather than papered over.
 ## Architecture
 
 ```
-BindingRegistry   personId <-> wallets, revocation. Written by the attestor.
-RebindableRWA     ERC-20 + ERC-1404, compliance gate in _update(), recoveryTransfer()
-RecoveryQueue     EIP-712 claims, cure window, issuer approval
-RebindExecutor    the only address allowed to perform a recovery transfer
+BindingRegistry     personId <-> wallets, guardians, revocation. Written by the attestor.
+RebindableRWA       ERC-20 + ERC-1404, compliance gate in _update(), recoveryTransfer()
+RecoveryQueue       EIP-712 claims, cure window, issuer approval and commitment
+RebindExecutor      the only address allowed to perform a recovery transfer
+BridgeAdvanceVault  lends against a committed claim; repaid inside execution
 ```
 
 ### The gate
@@ -110,12 +111,26 @@ sender is revoked`.
 1. **Attestation** — opening a claim needs an EIP-712 signature from the
    attestor, who only signs after `query_apass_list` confirms both wallets share
    one `customerId`. A stolen *wallet* is not a stolen *identity*.
-2. **Cure window** — opening a claim immediately freezes the old binding, so a
+2. **Guardian co-sign** — the claim also needs a signature from the guardian
+   wallet nominated at registration and recorded on-chain. A compromised
+   attestor key is not enough on its own.
+3. **Cure window** — opening a claim immediately freezes the old binding, so a
    compromised key cannot drain the asset while the claim is reviewed. This is
    the transfer agent's notice period, on-chain.
-3. **Issuer approval** — a human countersigns, and may reject during the window.
+4. **Issuer approval** — a human countersigns, and may reject during the window.
 
-Defeating all three needs the wallet *and* the identity *and* the issuer.
+Defeating all four needs the wallet *and* the identity *and* the guardian key
+*and* the issuer.
+
+Two degenerate cases are closed explicitly: a claim where `oldWallet ==
+newWallet` is rejected (it would otherwise freeze a wallet and go nowhere), and
+only one claim may be active per old wallet at a time (so two claims cannot
+race for approval).
+
+**The guardian key must not be the attestor key.** If one party signs both
+halves, layer 2 collapses back into layer 1 and the claim above stops being
+true. The backend refuses to fall back to `ATTESTOR_PK`; set `GUARDIAN_PK`, and
+in local mode a separate disposable key is derived automatically.
 
 **Who may cancel — and why it is not the old wallet.** `cancel()` is
 `onlyRole(ISSUER_ROLE)`. Giving the incumbent wallet a veto looks protective
@@ -151,7 +166,7 @@ Base Sepolia testnet ETH: https://www.alchemy.com/faucets/base-sepolia
 
 ```bash
 npm run compile
-npm test              # 81 tests (37 contract, 28 backend, 16 local stub)
+npm test              # 133 tests (contract, bridge advance, backend, local stub)
 ```
 
 **If `npx hardhat compile` fails with HH502** (can't reach
@@ -247,22 +262,100 @@ and "key compromised", which is narration — replay from the last provable step
 
 ---
 
-## The demo — six beats, under four minutes
+## The demo — under four minutes
 
 | # | Beat | What the room sees |
 |---|---|---|
-| 1 | Register & mint | A-Pass for wallet A, 250 NOTE issued |
+| 1 | Register & mint | A-Pass for wallet A, guardian nominated, 250 NOTE issued |
 | 2 | **Attacker attempts theft** | **Reverts.** `RecipientNotEligible` |
-| 3 | Alice claims from wallet B | Same `customerId` proven, claim opened |
+| 3 | Alice claims from wallet B | Same `customerId` proven, guardian co-signs, claim opened |
 | 4 | Cure window | Countdown; wallet A already frozen, issuer may reject |
-| 5 | Approve & execute | Note lands in B, old binding revoked |
-| 6 | Audit pack | Real Cleanverse Travel Rule PDF |
+| 5 | Bridge advance *(if a vault is deployed)* | Issuer underwrites, Alice borrows against the frozen claim |
+| 6 | Approve & execute | Note lands in B, advance repays itself out of the recovery |
+| 7 | Audit pack | Real Cleanverse Travel Rule PDF |
 
 **Beat 2 is the moment.** The audience watches compliance *block* an attacker,
 then watches the same machinery *return the asset* to its rightful owner.
 
 The line: *"Every other project here asks how to keep the wrong people out.
 This one asks what we owe the people we already verified."*
+
+---
+
+## Bridge advances — borrowing against a frozen claim
+
+The cure window protects the asset by freezing it. It freezes the rightful
+owner just as effectively. Over a realistic 48-hour window that is the
+difference between *"my recovery is proceeding"* and *"I cannot make rent"*.
+
+She is not poor during those hours. She is **illiquid against a receivable that
+is about to settle**. `BridgeAdvanceVault` prices that receivable: it lends a
+stable asset at an LTV haircut, and is repaid out of the recovery itself.
+
+### Why a pending claim was not lendable
+
+`cancel()` works right up until execution — **including after `approve()`**. So
+an issuer could approve a claim, watch a lender disburse against it, then
+cancel and leave the lender with an unsecured loss and nothing to collect
+against. Approval was never a promise; it was a revocable opinion.
+
+`RecoveryQueue.commit()` adds the missing state. It approves the claim **and
+permanently surrenders the issuer's right to cancel it.** The vault refuses
+approved claims and lends only against committed ones, so its credit question
+is not *"will the issuer honour this?"* but *"has the issuer already given up
+the ability not to?"*
+
+The honest cost, stated in the contract too: a claim committed by mistake can
+no longer be rejected. Commitment must follow the same review that approval
+does, not precede it.
+
+### Why repayment cannot be skipped
+
+It is not a promise the borrower keeps. `RebindExecutor` asks the vault what is
+owed and routes that much of the recovered balance to it **in the same
+transaction that settles the claim**, before the remainder reaches the
+borrower. There is no instant at which the borrower holds the full balance and
+could decline to repay.
+
+Worked example, at the demo's 80% LTV and 0.5% fee:
+
+| | |
+|---|---|
+| Claim value | 5,000 NOTE |
+| Advanced now | 4,000 dUSDC |
+| Owed at settlement | 4,020 NOTE |
+| On execution → vault | 4,020 NOTE |
+| On execution → wallet B | 980 NOTE |
+
+The borrower signs an EIP-712 authorisation and anyone may relay it, so a
+wallet in the middle of recovering an asset does not need gas to borrow.
+
+### What the vault still risks
+
+1. **Balance falls after the draw.** It cannot be spent — the wallet is frozen
+   — but the issuer can still burn, and a redemption could reduce it. The LTV
+   haircut is the buffer, and the executor caps repayment at whatever actually
+   arrives, so the vault absorbs the shortfall rather than the recovery
+   reverting. Stranding a rightful owner's asset because a lender is underwater
+   would make the loan a hostage.
+2. **Price.** Repayment arrives in the note, not the stable that was lent, so
+   the vault runs long the note and short stables. At par with a redeemable
+   note that is inventory; with a note that trades at a discount it is
+   solvency, and the LTV must reflect it. `ParAdvanceOracle` values at par and
+   is deliberately not configurable — an oracle an admin can silently re-point
+   is a worse trust assumption than one that cannot move. Swap in a different
+   `IAdvanceOracle` for a real feed.
+3. **The vault must hold an A-Pass.** The note is transfer-restricted, so
+   losing that binding would strand every outstanding advance. `deploy.js`
+   binds it as an institutional wallet.
+
+### Running it
+
+On by default in `deploy.js`; set `BRIDGE_ADVANCE=false` to deploy without it,
+and the executor takes `address(0)` for the vault and behaves exactly as it did
+before advances existed. Tune with `ADVANCE_LTV_BPS`, `ADVANCE_FEE_BPS` and
+`ADVANCE_SEED`. On a network with a real stablecoin, set `STABLE_ADDRESS` and
+`DemoStablecoin` is never deployed.
 
 ---
 
@@ -288,9 +381,12 @@ This one asks what we owe the people we already verified."*
 
 ```
 contracts/     BindingRegistry, RebindableRWA, RecoveryQueue, RebindExecutor, IERC1404
-test/          65 tests. rebind.test.js covers every on-chain attack path and
-               every ERC-1404 code; backend.test.js covers the AES envelope
-               and attestor refusals (offline — stubs fetch, no credentials)
+               BridgeAdvanceVault + IAdvanceOracle/ParAdvanceOracle (lending
+               against a committed claim), DemoStablecoin (demo only)
+test/          133 tests. rebind.test.js covers every on-chain attack path and
+               every ERC-1404 code; bridge-advance.test.js covers the lending
+               invariants; backend.test.js and cleanverse-local.test.js run
+               offline (stub fetch, no credentials)
 scripts/       deploy, register-atoken, freeze-scope-test, compile-local, fund-local
 backend/       cleanverse.js (API+AES), attestor.js (EIP-712), server.js
                cleanverse-local.js (offline stub), cleanverse-client.js (mode switch)
