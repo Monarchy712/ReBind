@@ -11,6 +11,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 const { ethers } = require("ethers");
 
 const cv = require("./cleanverse-client");
@@ -23,7 +24,32 @@ const D = require("../deployments.json"); // written by scripts/deploy.js
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "..", "frontend")));
+/* The frontend is a Vite/React app. In production it is a static bundle in
+   frontend/dist, which this server hands out so `npm run server:local` still
+   gives you the whole thing on one port. During development you would instead
+   run `npm run web` (Vite on :5173) and let its proxy forward /api here.
+   Serving the un-built source directory would only ever hand the browser a
+   bare index.html pointing at /src/main.jsx, so say so plainly instead. */
+const WEB_DIST = path.join(__dirname, "..", "frontend", "dist");
+if (fs.existsSync(path.join(WEB_DIST, "index.html"))) {
+  app.use(express.static(WEB_DIST));
+} else {
+  console.warn(
+    "  frontend  NOT BUILT — run `npm run web:build` (or use `npm run web` for the dev server)",
+  );
+  app.get("/", (_req, res) =>
+    res
+      .status(503)
+      .type("html")
+      .send(
+        "<pre style='font:14px ui-monospace;padding:40px;line-height:1.7'>" +
+          "The frontend has not been built yet.\n\n" +
+          "  npm run web:build     build it once, then reload this page\n" +
+          "  npm run web           or run the Vite dev server on :5173\n\n" +
+          "The API on this port is running normally.</pre>",
+      ),
+  );
+}
 
 // In local mode the contracts live on the Hardhat node, not on RPC_URL — which
 // still holds the testnet endpoint so switching modes needs no .env edit.
@@ -162,6 +188,7 @@ const fail = (res, e) => {
 app.post("/api/register", async (req, res) => {
   try {
     const { customerId, address, override, guardianAddress } = req.body;
+    requireAddress(address, "address");
     if (!guardianAddress || !ethers.isAddress(guardianAddress) || guardianAddress === ethers.ZeroAddress) {
       throw new Error("guardianAddress is required and must be a valid non-zero address");
     }
@@ -201,16 +228,37 @@ app.post("/api/register", async (req, res) => {
 app.post("/api/mint", async (req, res) => {
   try {
     const { to, amount } = req.body;
+    requireAddress(to, "to");
+    if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+      throw new Error(`amount must be a positive number, got ${JSON.stringify(amount)}`);
+    }
     const tx = await token.mint(to, ethers.parseUnits(String(amount), 6));
     await tx.wait();
     ok(res, { txHash: tx.hash, balance: (await token.balanceOf(to)).toString() });
   } catch (e) { fail(res, e); }
 });
 
+/**
+ * Reject anything that is not an address before it reaches ethers.
+ *
+ * Without this, a typo in the recovery wizard's address field came back as
+ * "network does not support ENS" — ethers assumes a non-address string is an
+ * ENS name and fails on a chain that has no resolver. That message tells the
+ * person who mistyped nothing at all about what went wrong.
+ */
+function requireAddress(value, label) {
+  if (!value || typeof value !== "string" || !ethers.isAddress(value)) {
+    throw new Error(`${label} is not a valid address: ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
 // ---- 3. pre-flight check (the blocked-theft beat) ---------------------------
 app.post("/api/check", async (req, res) => {
   try {
     const { from, to, amount } = req.body;
+    requireAddress(from, "from");
+    requireAddress(to, "to");
     // ERC-1404 is two calls by design: a cheap numeric code, then the text.
     const value = amount ? ethers.parseUnits(String(amount), 6) : 0n;
     const code = await token.detectTransferRestriction(from, to, value);
@@ -224,6 +272,8 @@ app.post("/api/check", async (req, res) => {
 app.post("/api/claim", async (req, res) => {
   try {
     const { customerId, oldWallet, newWallet, guardianSignature, guardianPrivateKey } = req.body;
+    requireAddress(oldWallet, "oldWallet");
+    requireAddress(newWallet, "newWallet");
 
     const nonce = await queue.nonces(newWallet);
     const block = await provider.getBlock("latest");
@@ -533,11 +583,30 @@ const localDemoWallets = LOCAL_MODE
   ? { A: demoAccount(5), B: demoAccount(6), X: demoAccount(7), G: demoAccount(8) }
   : null;
 
+/**
+ * The address of whichever key guardianKey() will actually co-sign with.
+ *
+ * This has to lead the guardian address we advertise, because the two used to
+ * disagree: G fell back to the generated local wallet while guardianKey()
+ * prefers GUARDIAN_PK. Local mode with a GUARDIAN_PK in .env therefore
+ * registered one guardian, pinned it in the registry, and then co-signed
+ * claims with a different key — openClaim reverted with
+ * BadGuardianAttestation and the demo could never get past the claim step.
+ */
+const guardianSignerAddress = (() => {
+  const k = guardianKey();
+  if (!k) return null;
+  try { return new ethers.Wallet(k).address; } catch { return null; }
+})();
+
 const DEMO_WALLETS = {
   A: process.env.DEMO_WALLET_A || localDemoWallets?.A.address || "0xa34118bD1A2A789A962A4471C59c3964fb716123",
   B: process.env.DEMO_WALLET_B || localDemoWallets?.B.address || "0x7A0A94615094Ef0673f2D0F031D43fB9ED78cc0B",
   X: process.env.DEMO_WALLET_X || localDemoWallets?.X.address || "0x6d11172f538b60BE3a69c745944767Ac94019df7",
-  G: process.env.DEMO_WALLET_G || localDemoWallets?.G.address || null,
+  // An explicit DEMO_WALLET_G still wins — that operator is nominating a
+  // guardian they will supply signatures for out of band, and canCoSign below
+  // reports honestly when we cannot sign for it.
+  G: process.env.DEMO_WALLET_G || guardianSignerAddress || localDemoWallets?.G.address || null,
 };
 
 /**
@@ -578,7 +647,15 @@ app.get("/api/config", (_req, res) => {
     localMode: LOCAL_MODE,
     // Whether this backend can co-sign as the guardian, or the caller must
     // supply the signature themselves.
-    guardian: { address: DEMO_WALLETS.G, canCoSign: guardianKey() !== null },
+    // canCoSign means "this backend can produce the co-signature for THAT
+    // address" — not merely "some guardian key exists". Reporting the latter
+    // is what let a mismatched pair reach the claim step and revert on-chain.
+    guardian: {
+      address: DEMO_WALLETS.G,
+      canCoSign: guardianSignerAddress !== null
+        && DEMO_WALLETS.G != null
+        && DEMO_WALLETS.G.toLowerCase() === guardianSignerAddress.toLowerCase(),
+    },
     advance: vault
       ? {
           enabled: true,

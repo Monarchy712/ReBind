@@ -49,22 +49,6 @@ async function signGuardianClaim(guardian, queueAddr, chainId, { personId, oldWa
   );
 }
 
-async function signGuardianClaim(guardian, queueAddr, chainId, { personId, oldWallet, newWallet, nonce, deadline }) {
-  return guardian.signTypedData(
-    { name: "Rebind", version: "1", chainId, verifyingContract: queueAddr },
-    {
-      GuardianRecoveryClaim: [
-        { name: "personId", type: "bytes32" },
-        { name: "oldWallet", type: "address" },
-        { name: "newWallet", type: "address" },
-        { name: "nonce", type: "uint256" },
-        { name: "deadline", type: "uint256" },
-      ],
-    },
-    { personId, oldWallet, newWallet, nonce, deadline }
-  );
-}
-
 describe("Bridge advance", function () {
   let admin, attestor, issuer, alice, aliceNew, outsider, guardian;
   let registry, token, queue, executor, vault, stable, oracle;

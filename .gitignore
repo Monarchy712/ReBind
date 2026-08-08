@@ -5,3 +5,6 @@ cache/
 deployments.json
 *.log
 rebind-handbook.pdf
+
+# Vite build output (regenerate with: npm run web:build)
+frontend/dist/
