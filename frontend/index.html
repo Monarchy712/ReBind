@@ -5,279 +5,744 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Rebind — identity outlives the key</title>
 <style>
+  /* ------------------------------------------------------------------ tokens
+     Near-monochrome on warm paper. One accent, used only where the eye needs
+     to be sent somewhere; one danger tone, used only for refusal and freeze.
+     No gradients, no glows, no shadows — hairlines do the separating. */
   :root{
-    --bg0:#070E20; --bg1:#0B1739; --panel:#12224A; --panel2:#16264F; --line:rgba(255,255,255,.07);
-    --mint:#3DF5C4; --blue:#5AC8FF; --violet:#9B8CFF; --amber:#FFC46B;
-    --body:#CBD8EE; --muted:#7E92B4; --red:#FF7B7B; --green:#57E39A;
-    --shadow:0 18px 40px -20px rgba(0,0,0,.7);
+    --paper:#FAF8F4;
+    --card:#FFFFFF;
+    --ink:#15150F;
+    --ink-2:#3A3A32;
+    --muted:#77746A;
+    --faint:#A5A198;
+    --rule:#E4E0D6;
+    --rule-2:#F0EDE5;
+    --accent:#1F44C4;
+    --accent-soft:#EDF0FC;
+    --danger:#9E2B1B;
+    --danger-soft:#FAEEEC;
+    --good:#1B5A38;
+    --warn:#7A5A12;
+
+    --serif:ui-serif,Georgia,"Iowan Old Style","Times New Roman",serif;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   }
+
   *{box-sizing:border-box;margin:0;padding:0}
+  html{-webkit-text-size-adjust:100%}
   body{
-    background:
-      radial-gradient(1200px 600px at 15% -10%, rgba(90,200,255,.10), transparent 60%),
-      radial-gradient(1000px 500px at 100% 0%, rgba(155,140,255,.10), transparent 55%),
-      var(--bg0);
-    color:var(--body);font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
-    padding:34px 26px;min-height:100vh;
+    background:var(--paper);
+    color:var(--ink);
+    font:16px/1.65 var(--sans);
+    -webkit-font-smoothing:antialiased;
   }
-  .wrap{max-width:1200px;margin:0 auto}
-  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-  .logo{display:flex;align-items:center;gap:12px}
-  .mark{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--mint),var(--blue));
-        box-shadow:0 0 22px rgba(61,245,196,.45);position:relative;flex:0 0 34px}
-  .mark::after{content:"";position:absolute;inset:9px;border-radius:4px;background:var(--bg0)}
-  h1{font-size:26px;color:#fff;letter-spacing:2px;font-weight:800}
-  .tag{color:var(--mint);font-style:italic;font-size:15px}
-  .chainchip{margin-left:auto;font-size:12px;color:var(--muted);background:var(--panel);
-        border:1px solid var(--line);padding:7px 12px;border-radius:99px;font-family:ui-monospace,monospace}
-  .sub{color:var(--muted);font-size:13px;margin:6px 0 24px}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 32px}
 
-  /* wallet cards */
-  .grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px;margin-bottom:22px}
-  @media(max-width:980px){.grid{grid-template-columns:1fr 1fr}}
-  .card{background:linear-gradient(180deg,var(--panel),var(--bg1));border:1px solid var(--line);
-        border-radius:16px;padding:18px;box-shadow:var(--shadow);transition:.35s}
-  .card.you{border-color:rgba(90,200,255,.35)}
-  .card.dest{border-color:rgba(61,245,196,.30)}
-  .card.guard{border-color:rgba(155,140,255,.35)}
-  .card.foe{border-color:rgba(255,123,123,.25)}
-  .card.frozen{border-color:rgba(255,123,123,.75);box-shadow:0 0 0 1px rgba(255,123,123,.4),var(--shadow)}
-  .card.win{border-color:rgba(87,227,154,.7);box-shadow:0 0 34px -6px rgba(87,227,154,.5)}
-  .chead{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-  .chead .who{color:#fff;font-size:14px;font-weight:700;display:flex;align-items:center;gap:8px}
-  .dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}
-  .card.you .dot{background:var(--blue)} .card.dest .dot{background:var(--mint)} .card.guard .dot{background:var(--violet)} .card.foe .dot{background:var(--red)}
-  .addr{font-family:ui-monospace,monospace;font-size:10.5px;color:var(--muted);word-break:break-all;margin-bottom:12px}
-  .bal{font-size:34px;color:#fff;font-weight:700;letter-spacing:-.5px;transition:.3s}
-  .bal small{font-size:14px;color:var(--muted);font-weight:500;margin-left:5px}
-  .bal.zero{color:var(--muted)}
-  .bal.pos{color:var(--mint)}
-  .pill{font-size:10px;padding:4px 10px;border-radius:99px;text-transform:uppercase;letter-spacing:.6px;font-weight:700}
-  .ok{background:rgba(61,245,196,.14);color:var(--mint)}
-  .bad{background:rgba(255,123,123,.16);color:var(--red)}
-  .warn{background:rgba(255,196,107,.16);color:var(--amber)}
-  .off{background:rgba(129,149,181,.14);color:var(--muted)}
-  .ribbon{margin-top:12px;font-size:11px;font-weight:600;color:var(--amber);
-          background:rgba(255,196,107,.10);border:1px solid rgba(255,196,107,.3);
-          border-radius:8px;padding:6px 10px;display:none}
-  .card.compromised .ribbon{display:block}
+  ::selection{background:var(--ink);color:var(--paper)}
 
-  /* stepper */
-  .rail{display:flex;gap:6px;margin-bottom:22px}
-  .rstep{flex:1;display:flex;flex-direction:column;gap:8px}
-  .rbar{height:5px;border-radius:99px;background:var(--panel2)}
-  .rstep.done .rbar{background:var(--mint)}
-  .rstep.active .rbar{background:var(--blue);animation:pulse 1.6s ease-in-out infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
-  .rlabel{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px}
-  .rstep.done .rlabel,.rstep.active .rlabel{color:var(--body)}
-  .rnum{font-size:10px;font-weight:800;width:16px}
+  /* ----------------------------------------------------------- masthead */
+  .masthead{
+    border-bottom:1px solid var(--rule);
+    padding:22px 0;
+    display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;
+  }
+  .wordmark{
+    font-size:14px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;
+  }
+  .masthead .role{
+    font-size:13px;color:var(--muted);
+    border-left:1px solid var(--rule);padding-left:18px;
+  }
+  #chain{
+    margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--muted);
+    letter-spacing:.02em;
+  }
+  body.disconnected #chain{color:var(--danger)}
 
-  /* stage */
-  .stage{background:linear-gradient(180deg,var(--panel2),var(--bg1));border:1px solid var(--line);
-         border-radius:18px;padding:26px;margin-bottom:20px;box-shadow:var(--shadow);min-height:190px}
-  .stage h2{color:#fff;font-size:20px;margin-bottom:6px}
-  .stage .lead{color:var(--muted);font-size:13.5px;max-width:640px;margin-bottom:18px}
-  button{background:linear-gradient(135deg,var(--mint),#37d9b6);color:#04241C;border:0;border-radius:10px;
-         padding:12px 20px;font-weight:750;font-size:14px;cursor:pointer;transition:.2s;
-         box-shadow:0 8px 20px -8px rgba(61,245,196,.7)}
-  button:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.05)}
-  button:disabled{background:#22335A;color:var(--muted);cursor:not-allowed;box-shadow:none}
-  button.ghost{background:transparent;border:1px solid var(--blue);color:var(--blue);box-shadow:none}
-  button.danger{background:linear-gradient(135deg,#FF8F8F,#e85f5f);color:#2a0808;box-shadow:0 8px 20px -8px rgba(255,123,123,.6)}
-  .hint{font-size:12px;color:var(--muted);margin-top:10px}
+  /* --------------------------------------------------------------- hero */
+  .hero{padding:88px 0 72px;border-bottom:1px solid var(--rule)}
+  .eyebrow{
+    font-size:11.5px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--muted);margin-bottom:26px;
+  }
+  h1{
+    font-family:var(--serif);
+    font-size:clamp(42px,7.2vw,76px);
+    line-height:1.03;letter-spacing:-.021em;font-weight:400;
+    max-width:15ch;
+  }
+  h1 em{font-style:italic;color:var(--accent)}
+  .lede{
+    font-size:19px;line-height:1.6;color:var(--ink-2);
+    max-width:58ch;margin-top:30px;
+  }
+  .lede strong{font-weight:600;color:var(--ink)}
 
-  /* branch */
-  .branch{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:6px}
-  .lane{background:var(--bg1);border:1px solid var(--line);border-radius:14px;padding:18px;transition:.3s}
-  .lane.fraud{border-color:rgba(255,123,123,.3)} .lane.legit{border-color:rgba(87,227,154,.3)}
-  .lane h4{color:#fff;font-size:14px;margin-bottom:4px;display:flex;align-items:center;gap:8px}
-  .lane p{font-size:12.5px;color:var(--muted);margin-bottom:14px;min-height:56px}
-  .lane.dim{opacity:.45;filter:saturate(.5)}
+  .facts{
+    display:grid;grid-template-columns:repeat(3,1fr);gap:0;
+    margin-top:56px;border-top:1px solid var(--rule);
+  }
+  .facts > div{padding:20px 26px 0 0}
+  .facts > div + div{padding-left:26px;border-left:1px solid var(--rule)}
+  .facts dt{
+    font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--faint);margin-bottom:7px;
+  }
+  .facts dd{font-size:14.5px;line-height:1.5;color:var(--ink-2)}
 
-  /* timer ring */
-  .ring{display:flex;align-items:center;gap:20px}
-  .ring svg{transform:rotate(-90deg)}
-  .ring .track{stroke:var(--panel);stroke-width:9;fill:none}
-  .ring .prog{stroke:var(--blue);stroke-width:9;fill:none;stroke-linecap:round;transition:stroke-dashoffset 1s linear}
-  .ringtxt .t{font-size:30px;font-family:ui-monospace,monospace;color:#fff}
-  .ringtxt .s{font-size:12px;color:var(--muted)}
+  /* ------------------------------------------------------------ sections */
+  section.band{padding:72px 0;border-bottom:1px solid var(--rule)}
+  .sectionhead{
+    display:flex;align-items:baseline;gap:16px;margin-bottom:8px;
+  }
+  .sectionhead .num{
+    font-family:var(--mono);font-size:11.5px;color:var(--faint);letter-spacing:.08em;
+  }
+  .sectionhead h2{
+    font-family:var(--serif);font-size:30px;font-weight:400;letter-spacing:-.015em;
+  }
+  .sectionsub{color:var(--muted);font-size:15px;max-width:56ch;margin-bottom:38px}
 
-  /* log */
-  .logwrap{background:var(--bg1);border:1px solid var(--line);border-radius:14px;overflow:hidden}
-  .loghead{display:flex;justify-content:space-between;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line)}
-  .loghead span{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
-  #log{padding:14px 16px;font-family:ui-monospace,monospace;font-size:11.5px;height:220px;overflow:auto;white-space:pre-wrap}
-  .l-ok{color:var(--mint)} .l-err{color:var(--red)} .l-info{color:var(--blue)} .l-dim{color:var(--muted)} .l-warn{color:var(--amber)}
-  a{color:var(--mint)}
-  .flash{animation:flash .6s ease}
-  @keyframes flash{0%{background:rgba(61,245,196,.18)}100%{background:transparent}}
+  /* -------------------------------------------------------- offline note */
+  .offline{
+    display:none;
+    border:1px solid var(--danger);border-left-width:3px;
+    background:var(--danger-soft);
+    padding:15px 18px;margin-bottom:30px;
+  }
+  .offline strong{display:block;font-size:14px;margin-bottom:3px;color:var(--danger)}
+  .offline span{font-size:13.5px;color:var(--ink-2)}
+  .offline code{font-family:var(--mono);font-size:12.5px;background:rgba(0,0,0,.05);padding:1px 5px}
+  body.disconnected .offline{display:block}
+
+  /* --------------------------------------------------------- wallet ledger */
+  .ledger{
+    display:grid;grid-template-columns:repeat(3,1fr);
+    border:1px solid var(--rule);background:var(--card);margin-bottom:34px;
+  }
+  .card{padding:22px 24px 24px;border-left:1px solid var(--rule);position:relative}
+  .card:first-child{border-left:0}
+  /* State is carried by a rule on the top edge, not by a coloured box. */
+  .card::before{
+    content:"";position:absolute;top:-1px;left:-1px;right:-1px;height:2px;background:transparent;
+  }
+  .card.frozen::before{background:var(--danger)}
+  .card.win::before{background:var(--accent)}
+
+  .chead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:14px}
+  .who{font-size:14px;font-weight:600;letter-spacing:-.005em}
+  .who .role{display:block;font-weight:400;font-size:12px;color:var(--faint);margin-top:2px}
+
+  .pill{
+    font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+    white-space:nowrap;color:var(--muted);
+  }
+  .pill::before{
+    content:"";display:inline-block;width:5px;height:5px;border-radius:50%;
+    background:currentColor;margin-right:6px;vertical-align:middle;
+  }
+  .pill.ok{color:var(--good)}
+  .pill.bad{color:var(--danger)}
+  .pill.off{color:var(--faint)}
+  .pill.off::before{background:transparent;box-shadow:inset 0 0 0 1px currentColor}
+
+  .addr{
+    font-family:var(--mono);font-size:10.5px;line-height:1.5;color:var(--faint);
+    word-break:break-all;margin-bottom:18px;
+  }
+  .bal{
+    font-family:var(--serif);font-size:40px;line-height:1;letter-spacing:-.02em;
+    font-variant-numeric:tabular-nums;color:var(--ink);
+  }
+  .bal.zero{color:var(--faint)}
+  .bal small{
+    font-family:var(--sans);font-size:11px;font-weight:600;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--faint);margin-left:8px;vertical-align:middle;
+  }
+  .ribbon{
+    display:none;margin-top:16px;padding-top:13px;border-top:1px solid var(--rule-2);
+    font-size:12px;line-height:1.45;color:var(--muted);
+  }
+  .card.compromised .ribbon,
+  .card.dest .ribbon,
+  .card.foe .ribbon{display:block}
+  .card.compromised .ribbon{color:var(--danger)}
+
+  /* ------------------------------------------------------------ guardian */
+  .guardian{
+    display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+    border:1px solid var(--rule);border-top:0;background:var(--card);
+    padding:13px 24px;margin-top:-34px;margin-bottom:34px;
+  }
+  .guardian .glabel{
+    font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+  }
+  .guardian .gaddr{font-family:var(--mono);font-size:11px;color:var(--ink-2);word-break:break-all}
+  .guardian .gnote{font-size:12.5px;color:var(--muted);flex:1 1 320px}
+
+  /* ------------------------------------------------------------- stepper */
+  .rail{display:grid;grid-template-columns:repeat(6,1fr);gap:0;margin-bottom:34px}
+  .rstep{padding-top:11px;border-top:2px solid var(--rule);padding-right:14px}
+  .rstep.done{border-top-color:var(--ink)}
+  .rstep.active{border-top-color:var(--accent)}
+  .rnum{
+    font-family:var(--mono);font-size:10.5px;color:var(--faint);
+    display:block;margin-bottom:3px;
+  }
+  .rstep.done .rnum{color:var(--ink-2)}
+  .rstep.active .rnum{color:var(--accent)}
+  .rlabel{font-size:12.5px;color:var(--muted);line-height:1.35}
+  .rstep.done .rlabel{color:var(--ink-2)}
+  .rstep.active .rlabel{color:var(--ink);font-weight:600}
+
+  /* --------------------------------------------------------------- stage */
+  .stage{
+    background:var(--card);border:1px solid var(--rule);
+    padding:36px 38px;margin-bottom:26px;min-height:230px;
+  }
+  .stage h2{
+    font-family:var(--serif);font-size:26px;font-weight:400;letter-spacing:-.015em;
+    line-height:1.2;margin-bottom:12px;max-width:24ch;
+  }
+  .stage .lead{color:var(--ink-2);font-size:15.5px;max-width:66ch;margin-bottom:26px}
+  .stage .lead em{font-style:italic}
+  .stage .lead strong{font-weight:600;color:var(--ink)}
+  .stage code{font-family:var(--mono);font-size:13px;background:var(--rule-2);padding:1px 5px}
+
+  /* ------------------------------------------------------------- buttons */
+  button{
+    font:600 14px/1 var(--sans);letter-spacing:-.003em;
+    background:var(--ink);color:var(--paper);
+    border:1px solid var(--ink);padding:13px 22px;cursor:pointer;
+    transition:background .15s ease,color .15s ease,border-color .15s ease;
+  }
+  button:hover:not(:disabled){background:#000;border-color:#000}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  button:disabled{
+    background:transparent;color:var(--faint);border-color:var(--rule);cursor:not-allowed;
+  }
+  button.ghost{background:transparent;color:var(--ink);border-color:var(--ink)}
+  button.ghost:hover:not(:disabled){background:var(--ink);color:var(--paper)}
+  button.danger{background:transparent;color:var(--danger);border-color:var(--danger)}
+  button.danger:hover:not(:disabled){background:var(--danger);color:#fff;border-color:var(--danger)}
+  .hint{font-size:13px;color:var(--muted);margin-top:12px;max-width:60ch}
+
+  /* -------------------------------------------------------------- branch */
+  .branch{display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid var(--rule)}
+  .lane{padding:26px 30px 4px 0}
+  .lane + .lane{padding-left:30px;border-left:1px solid var(--rule)}
+  .lane h4{
+    font-size:12px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;
+    margin-bottom:10px;
+  }
+  .lane.fraud h4{color:var(--danger)}
+  .lane.legit h4{color:var(--good)}
+  .lane p{font-size:14px;color:var(--ink-2);margin-bottom:18px;max-width:44ch}
+  .lane.dim{opacity:.5}
+
+  /* ---------------------------------------------------------- timer ring */
+  .ring{display:flex;align-items:center;gap:22px;margin-bottom:22px}
+  .ring svg{transform:rotate(-90deg);flex:0 0 auto}
+  .ring .track{stroke:var(--rule);stroke-width:2;fill:none}
+  .ring .prog{stroke:var(--accent);stroke-width:2;fill:none;transition:stroke-dashoffset 1s linear}
+  .ringtxt .t{
+    font-family:var(--mono);font-size:32px;letter-spacing:-.02em;
+    font-variant-numeric:tabular-nums;line-height:1.1;
+  }
+  .ringtxt .s{
+    font-size:11px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;
+    color:var(--faint);margin-top:4px;
+  }
+
+  /* ----------------------------------------------------------------- log */
+  .logwrap{border:1px solid var(--rule);background:var(--card)}
+  .loghead{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:12px 18px;border-bottom:1px solid var(--rule);
+  }
+  .loghead span{
+    font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+  }
+  #claimchip{font-family:var(--mono);letter-spacing:.04em;text-transform:none;color:var(--accent)}
+  #log{
+    padding:16px 18px;font-family:var(--mono);font-size:11.5px;line-height:1.85;
+    height:236px;overflow:auto;white-space:pre-wrap;color:var(--muted);
+  }
+  #log:empty::before{content:"Waiting for the first action…";color:var(--faint)}
+  .l-ok{color:var(--good)} .l-err{color:var(--danger)} .l-info{color:var(--accent)}
+  .l-dim{color:var(--faint)} .l-warn{color:var(--warn)}
+
+  /* -------------------------------------------------------- how it works */
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-top:1px solid var(--rule)}
+  .steps article{padding:26px 28px 0 0}
+  .steps article + article{padding-left:28px;border-left:1px solid var(--rule)}
+  .steps .num{font-family:var(--mono);font-size:11.5px;color:var(--faint);display:block;margin-bottom:10px}
+  .steps h3{font-size:16px;font-weight:600;margin-bottom:9px;letter-spacing:-.008em}
+  .steps p{font-size:14px;color:var(--ink-2);line-height:1.6}
+  .steps code{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+
+  blockquote{
+    margin-top:56px;padding:32px 0 0;border-top:1px solid var(--rule);
+    font-family:var(--serif);font-size:23px;line-height:1.45;letter-spacing:-.012em;
+    max-width:40ch;
+  }
+  blockquote em{font-style:italic;color:var(--accent)}
+  blockquote cite{
+    display:block;margin-top:18px;font:600 11px/1 var(--sans);
+    letter-spacing:.14em;text-transform:uppercase;color:var(--faint);font-style:normal;
+  }
+
+  /* -------------------------------------------------------------- footer */
+  footer{padding:40px 0 64px;font-size:13px;color:var(--faint);display:flex;gap:22px;flex-wrap:wrap}
+  footer span{font-family:var(--mono);font-size:11.5px}
+
+  /* ---------------------------------------------------------- responsive */
+  @media (max-width:880px){
+    .wrap{padding:0 22px}
+    .hero{padding:60px 0 52px}
+    section.band{padding:54px 0}
+    .facts,.steps{grid-template-columns:1fr}
+    .facts > div,.steps article,
+    .facts > div + div,.steps article + article{
+      padding:20px 0;border-left:0;border-top:1px solid var(--rule-2);
+    }
+    .facts > div:first-child,.steps article:first-child{border-top:0}
+    .ledger{grid-template-columns:1fr}
+    .card{border-left:0;border-top:1px solid var(--rule)}
+    .card:first-child{border-top:0}
+    .card.frozen::before,.card.win::before{height:0;width:2px;top:0;bottom:0;left:-1px;right:auto}
+    .card.frozen::before{background:var(--danger)}
+    .rail{grid-template-columns:repeat(3,1fr);gap:0 14px;row-gap:16px}
+    .stage{padding:26px 22px}
+    .branch{grid-template-columns:1fr}
+    .lane{padding:24px 0 4px}
+    .lane + .lane{padding-left:0;border-left:0;border-top:1px solid var(--rule)}
+  }
+  @media (max-width:560px){
+    .rail{grid-template-columns:repeat(2,1fr)}
+    .stage button{width:100%}
+    .ring{gap:16px}
+    blockquote{font-size:20px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important}
+  }
 </style>
 </head>
 <body>
+
 <div class="wrap">
-  <header>
-    <div class="logo"><div class="mark"></div><h1>REBIND</h1><span class="tag">Identity outlives the key.</span></div>
-    <div class="chainchip" id="chain">connecting…</div>
+
+  <header class="masthead">
+    <div class="wordmark">Rebind</div>
+    <div class="role">Recovery infrastructure for permissioned assets</div>
+    <div id="chain">connecting…</div>
   </header>
-  <p class="sub">Recovery infrastructure for compliance-restricted real-world assets. Same person, new wallet — without trusting the issuer to say so.</p>
 
-  <!-- wallets -->
-  <div class="grid">
-    <div class="card you" id="cardA">
-      <div class="chead"><div class="who"><span class="dot"></span>Alice · wallet A</div><span id="pA" class="pill off">—</span></div>
-      <div class="addr" id="aA">…</div>
-      <div class="bal zero" id="bA">0<small>NOTE</small></div>
-      <div class="ribbon" id="ribA">⚠ Key exposed — attacker may hold this private key</div>
-    </div>
-    <div class="card dest" id="cardB">
-      <div class="chead"><div class="who"><span class="dot"></span>Alice · wallet B</div><span id="pB" class="pill off">—</span></div>
-      <div class="addr" id="aB">…</div>
-      <div class="bal zero" id="bB">0<small>NOTE</small></div>
-      <div class="ribbon" id="ribB" style="color:var(--mint);background:rgba(61,245,196,.08);border-color:rgba(61,245,196,.3)">Recovery destination · same customerId</div>
-    </div>
-    <div class="card guard" id="cardG">
-      <div class="chead"><div class="who"><span class="dot"></span>Alice · Guardian</div><span id="pG" class="pill" style="background:rgba(155,140,255,.16);color:var(--violet)">CO-SIGNER</span></div>
-      <div class="addr" id="aG">…</div>
-      <div class="bal" id="bG" style="font-size:20px;color:var(--violet);margin-top:8px;font-weight:700">Co-Signer<small style="display:block;font-size:11px;color:var(--muted);margin-left:0;margin-top:2px">4th defense layer</small></div>
-      <div class="ribbon" id="ribG" style="display:block;color:var(--violet);background:rgba(155,140,255,.08);border-color:rgba(155,140,255,.3)">Independent key · co-signs all claims</div>
-    </div>
-    <div class="card foe" id="cardX">
-      <div class="chead"><div class="who"><span class="dot"></span>Attacker</div><span id="pX" class="pill off">—</span></div>
-      <div class="addr" id="aX">…</div>
-      <div class="bal zero" id="bX">0<small>NOTE</small></div>
-      <div class="ribbon" id="ribX" style="color:var(--red);background:rgba(255,123,123,.08);border-color:rgba(255,123,123,.3)">Unverified wallet · no A-Pass</div>
-    </div>
-  </div>
+  <!-- ------------------------------------------------------------- hero -->
+  <section class="hero">
+    <p class="eyebrow">Compliance-restricted real-world assets</p>
+    <h1>Identity outlives <em>the key.</em></h1>
+    <p class="lede">
+      A permissioned asset can only move between wallets that passed KYC. So when the
+      holder's key is lost or stolen, the asset is stranded — the compliance gate that
+      stops the thief stops the owner too. Rebind moves it to another wallet
+      <strong>the same verified person already controls</strong>, on evidence the issuer
+      cannot fabricate.
+    </p>
+    <dl class="facts">
+      <div>
+        <dt>Evidence</dt>
+        <dd>One customerId, two wallets. Read from Cleanverse, signed EIP-712 off-chain.</dd>
+      </div>
+      <div>
+        <dt>Gate</dt>
+        <dd>ERC-1404 transfer restrictions, enforced by the token itself.</dd>
+      </div>
+      <div>
+        <dt>Safety</dt>
+        <dd>Freeze on claim, then a challenge window a human can reject inside.</dd>
+      </div>
+    </dl>
+  </section>
 
-  <!-- progress rail -->
-  <div class="rail" id="rail"></div>
+  <!-- ------------------------------------------------------------- demo -->
+  <section class="band">
+    <div class="sectionhead"><span class="num">01</span><h2>The demo</h2></div>
+    <p class="sectionsub">
+      Run against a live chain. Alice holds a restricted note, an attacker is refused, her key
+      is lost, and she recovers into a second wallet she already had verified — borrowing
+      against the claim while the window runs, if a vault is deployed.
+    </p>
 
-  <!-- stage -->
-  <div class="stage" id="stage"></div>
+    <div class="offline" id="offline" role="alert">
+      <strong>Backend unreachable</strong>
+      <span id="offlineDetail">Nothing on this page will work until it is running. Start it with <code>npm run server:local</code>.</span>
+    </div>
 
-  <!-- log -->
-  <div class="logwrap">
-    <div class="loghead"><span>Live trace</span><span id="claimchip"></span></div>
-    <div id="log"></div>
-  </div>
+    <div class="ledger">
+      <div class="card you" id="cardA">
+        <div class="chead">
+          <div class="who">Alice<span class="role">wallet A · original</span></div>
+          <span id="pA" class="pill off">—</span>
+        </div>
+        <div class="addr" id="aA">…</div>
+        <div class="bal zero" id="bA">0<small>Note</small></div>
+        <div class="ribbon" id="ribA">Key exposed — an attacker may hold this private key.</div>
+      </div>
+
+      <div class="card dest" id="cardB">
+        <div class="chead">
+          <div class="who">Alice<span class="role">wallet B · recovery destination</span></div>
+          <span id="pB" class="pill off">—</span>
+        </div>
+        <div class="addr" id="aB">…</div>
+        <div class="bal zero" id="bB">0<small>Note</small></div>
+        <div class="ribbon" id="ribB">Same customerId as wallet A. That shared identity is the whole mechanism.</div>
+      </div>
+
+      <div class="card foe" id="cardX">
+        <div class="chead">
+          <div class="who">Attacker<span class="role">unknown party</span></div>
+          <span id="pX" class="pill off">—</span>
+        </div>
+        <div class="addr" id="aX">…</div>
+        <div class="bal zero" id="bX">0<small>Note</small></div>
+        <div class="ribbon" id="ribX">No A-Pass. The token refuses it as a destination.</div>
+      </div>
+    </div>
+
+    <!-- The guardian holds no assets, so it is a note on the ledger rather
+         than a fourth balance card. -->
+    <div class="guardian" id="guardianRow">
+      <span class="glabel">Guardian co-signer</span>
+      <span class="gaddr" id="aG">—</span>
+      <span class="gnote">Nominated at registration. Must co-sign any recovery claim, so a compromised attestor key is not enough on its own.</span>
+    </div>
+
+    <div class="rail" id="rail"></div>
+    <div class="stage" id="stage"></div>
+
+    <div class="logwrap">
+      <div class="loghead"><span id="logLabel">Trace</span><span id="claimchip"></span></div>
+      <div id="log" role="log" aria-live="polite" aria-labelledby="logLabel"></div>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------- how it works -->
+  <section class="band">
+    <div class="sectionhead"><span class="num">02</span><h2>How it works</h2></div>
+    <p class="sectionsub">Three decisions carry the design. Each one is about limiting what a compromised party can do.</p>
+
+    <div class="steps">
+      <article>
+        <span class="num">01</span>
+        <h3>The evidence lives off-chain</h3>
+        <p>
+          A contract cannot call an HTTP API. But the fact that two wallets belong to one
+          person exists only in Cleanverse's <code>query_apass_list</code>. An attestor reads
+          it and signs an EIP-712 attestation; <code>RecoveryQueue</code> runs
+          <code>ecrecover</code> and trusts the signer — never whoever submitted the transaction.
+        </p>
+      </article>
+      <article>
+        <span class="num">02</span>
+        <h3>The token enforces its own rules</h3>
+        <p>
+          Transfers pass through ERC-1404: <code>detectTransferRestriction</code> returns a
+          numeric code, <code>messageForTransferRestriction</code> the human reason. An
+          unverified destination is refused by the asset itself, with no coordination
+          from anyone off-chain.
+        </p>
+      </article>
+      <article>
+        <span class="num">03</span>
+        <h3>Freeze first, review second</h3>
+        <p>
+          Opening a claim freezes the old wallet in the same transaction, so a stolen key
+          cannot race the recovery it triggered. Only then does the challenge window run,
+          giving a reviewer time to reject an impersonation before anything moves.
+        </p>
+      </article>
+    </div>
+
+    <blockquote>
+      The issuer can approve a claim, and can reject one. It can never
+      <em>manufacture</em> one — the identity evidence comes from a system the
+      issuer does not control.
+      <cite>The property everything else is built to protect</cite>
+    </blockquote>
+  </section>
+
+  <footer>
+    <span>ERC-1404</span>
+    <span>EIP-712</span>
+    <span>Cleanverse A-Pass</span>
+    <span id="footMode"></span>
+  </footer>
+
 </div>
 
 <script>
 const API="";
-function makeAddr(){
-  const b=new Uint8Array(20);
-  crypto.getRandomValues(b);
-  return "0x"+Array.from(b).map(x=>x.toString(16).padStart(2,"0")).join("");
+
+/* Wallets and the challenge window come from GET /api/config. They used to be
+   hardcoded here, so running the demo meant hand-editing this file — the README
+   carried that as a setup step, and the "30 seconds" in the copy below silently
+   lied whenever CURE_WINDOW was set to anything else. */
+let W={}, cureWindow=null, CID=null;
+/* Bridge advance config from /api/config, and the last state read for the
+   current claim. Both stay inert when no vault is deployed. */
+let advance={enabled:false}, adv=null;
+
+let claimId=null,lastTx=null,step=0,rejected=false,recovered=false,windowElapsed=false,
+    timerInt=null,totalWindow=null,lastSplit=null;
+
+/* The customerId must survive a reload. A resumed session opens its claim
+   against the identity wallets A and B were registered under; a fresh id would
+   make the attestor correctly refuse to attest. Keyed by token address so a
+   redeploy starts a clean session. */
+function sessionCustomerId(token){
+  const key="rebind.cid."+token;
+  let v=null;
+  try{ v=localStorage.getItem(key); }catch{}
+  if(!v){
+    v="ALICEDEMO"+Date.now().toString().slice(-6);
+    try{ localStorage.setItem(key,v); }catch{}
+  }
+  return v;
 }
-const W={
-  A: makeAddr(),
-  B: makeAddr(),
-  X: makeAddr(),
-  G: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+
+function fmtWindow(s){
+  if(s==null) return "the challenge window";
+  if(s<60) return `${s} seconds`;
+  if(s<3600) return `${Math.round(s/60)} minute${Math.round(s/60)===1?"":"s"}`;
+  return `${+(s/3600).toFixed(1)} hours`;
+}
+
+/* Beats are named rather than positional. The bridge advance adds one only
+   when a vault is deployed, and doing index arithmetic against a flow whose
+   length varies is how off-by-one bugs get written. */
+const BEAT_TITLES={
+  register:"Register & issue",
+  steal:"Theft blocked",
+  compromise:"Key compromised",
+  claim:"Recovery claim",
+  review:"Issuer review",
+  advance:"Bridge advance",
+  done:"Resolved",
 };
-const CID="ALICEDEMO"+Date.now().toString().slice(-6);
-
-let claimId=null,lastTx=null,step=0,rejected=false,windowElapsed=false,
-    timerInt=null,totalWindow=null;
-
-/* beats: linear until the branch at step 4 (review) */
-const BEATS=[
-  {icon:"➊",title:"Register & issue"},
-  {icon:"➋",title:"Theft blocked"},
-  {icon:"➌",title:"Key compromised"},
-  {icon:"➍",title:"Recovery claim"},
-  {icon:"➎",title:"Issuer review"},
-  {icon:"✓",title:"Resolved"},
-];
+let BEATS=["register","steal","compromise","claim","review","done"];
+function buildBeats(){
+  BEATS = advance.enabled
+    ? ["register","steal","compromise","claim","review","advance","done"]
+    : ["register","steal","compromise","claim","review","done"];
+}
+const beat=()=>BEATS[step];
+const goTo=(id)=>{ const i=BEATS.indexOf(id); if(i>=0) step=i; };
+const atOrPast=(id)=>step>=BEATS.indexOf(id);
 
 /* ---------- helpers ---------- */
 function log(msg,cls="l-dim"){
   const el=document.getElementById("log");
-  el.innerHTML+=`<span class="${cls}">[${new Date().toLocaleTimeString()}] ${msg}</span>\n`;
+  el.innerHTML+=`<span class="${cls}">${new Date().toLocaleTimeString()}  ${msg}</span>\n`;
   el.scrollTop=el.scrollHeight;
 }
-async function post(path,body){
-  const r=await fetch(API+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-  const j=await r.json(); if(!j.ok) throw new Error(j.error||"request failed"); return j;
+
+/* Connection state. The old code called r.json() unconditionally, so a backend
+   that was down, or a plain static file server, surfaced as
+   "Unexpected token '<'" in the trace with no hint about the actual cause. */
+function setConnected(up,detail){
+  document.body.classList.toggle("disconnected",!up);
+  if(!up){
+    if(detail) document.getElementById("offlineDetail").textContent=detail;
+    document.getElementById("chain").textContent="offline";
+  }
 }
-function short(h){return h?h.slice(0,18)+"…":"";}
+
+async function request(path,opts){
+  let r;
+  try{
+    r=await fetch(API+path,opts);
+  }catch{
+    setConnected(false,"Nothing is listening on this port. Start the backend with npm run server:local for the offline demo, or npm run server against a testnet.");
+    throw new Error("Backend unreachable — is the server running?");
+  }
+
+  const text=await r.text();
+  let j;
+  try{
+    j=JSON.parse(text);
+  }catch{
+    setConnected(false,`Got a reply on this port, but not JSON (HTTP ${r.status}). This is probably a plain file server, not the Rebind backend.`);
+    throw new Error(`Backend returned non-JSON (HTTP ${r.status})`);
+  }
+
+  setConnected(true);
+  if(!j.ok) throw new Error(j.error||`Request failed (HTTP ${r.status})`);
+  return j;
+}
+
+async function post(path,body){
+  return request(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+}
+
+/** Reads that drive polling: a failure updates the banner and returns null. */
+async function getJSON(path){
+  try{ return await request(path); }catch{ return null; }
+}
+function short(h){return h?h.slice(0,14)+"…":"";}
+
+/* /api/execute reports balances in base units, unlike /api/state which is
+   already formatted — so the trace used to end on "B: 250000000". Matches the
+   6 decimals the token is deployed with in scripts/deploy.js. */
+const NOTE_DECIMALS=6;
+function units(v){
+  const n=Number(v)/10**NOTE_DECIMALS;
+  return Number.isFinite(n)?n.toLocaleString():String(v);
+}
+function pad2(n){return String(n).padStart(2,"0");}
 
 function renderRail(){
-  document.getElementById("rail").innerHTML=BEATS.map((b,i)=>`
+  document.getElementById("rail").style.gridTemplateColumns=`repeat(${BEATS.length},1fr)`;
+  document.getElementById("rail").innerHTML=BEATS.map((id,i)=>`
     <div class="rstep ${i<step?'done':i===step?'active':''}">
-      <div class="rbar"></div>
-      <div class="rlabel"><span class="rnum">${b.icon}</span>${b.title}</div>
+      <span class="rnum">${pad2(i+1)}</span>
+      <div class="rlabel">${BEAT_TITLES[id]}</div>
     </div>`).join("");
+}
+
+/** The countdown ring, shared by the review and advance beats. */
+function ringMarkup(){
+  return `
+      <div class="ring">
+        <svg width="76" height="76" viewBox="0 0 76 76" aria-hidden="true">
+          <circle class="track" cx="38" cy="38" r="36"></circle>
+          <circle class="prog" id="ringP" cx="38" cy="38" r="36" stroke-dasharray="226.2" stroke-dashoffset="0"></circle>
+        </svg>
+        <div class="ringtxt"><div class="t" id="timer">—</div><div class="s" id="timerLbl">challenge window</div></div>
+      </div>`;
 }
 
 /* ---------- stage renderer (drives the whole flow) ---------- */
 function renderStage(){
   const s=document.getElementById("stage");
-  document.getElementById("cardA").classList.toggle("compromised", step>=2 && lastTx===null);
+  document.getElementById("cardA").classList.toggle("compromised", atOrPast("compromise") && !recovered);
+  const id=beat();
 
-  if(step===0){
-    s.innerHTML=view("Register Alice and issue the asset",
-      "Wallet A receives an A-Pass under Alice's Cleanverse customerId and is issued 250 units of a compliance-restricted NOTE. Alice nominates an independent guardian address required for future recovery co-signing. Wallet B is registered to the <em>same</em> customerId — that shared identity is what makes recovery possible.",
-      `<div style="margin-bottom:14px"><label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">Guardian wallet address (required for co-signing recovery claims):</label><input id="guardianInput" type="text" value="${W.G||''}" placeholder="0x..." style="width:100%;max-width:480px;background:var(--bg1);border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:#fff;font-family:ui-monospace,monospace;font-size:12px"></div><button onclick="run('register')">Register &amp; mint 250 NOTE</button>`);
+  if(id==="register"){
+    s.innerHTML=view("Register Alice, then issue the asset",
+      "Wallet A receives an A-Pass under Alice's Cleanverse customerId and is issued 250 units of a compliance-restricted note. Wallet B is registered to the <em>same</em> customerId — that shared identity is what makes recovery possible later.",
+      `<button onclick="run('register')">Register and mint 250 NOTE</button>`);
   }
-  else if(step===1){
+  else if(id==="steal"){
     s.innerHTML=view("An attacker tries to move the asset",
-      "Someone attempts to transfer the NOTE from wallet A to an unverified wallet. The token's on-chain compliance gate checks the destination's A-Pass and refuses. Compliance protects the asset even before recovery enters the picture.",
-      `<button class="danger" onclick="run('steal')">Attempt theft → attacker wallet</button>`);
+      "Someone attempts to transfer the note from wallet A to an unverified wallet. The token's own compliance gate checks the destination's A-Pass and refuses. The asset is protected before recovery enters the picture at all.",
+      `<button class="danger" onclick="run('steal')">Attempt transfer to attacker</button>`);
   }
-  else if(step===2){
-    s.innerHTML=view("Alice's key is lost / compromised",
-      "The private key for wallet A is gone — lost, phished, or leaked. In a normal system the asset is now stranded (or the attacker drains it). Alice still controls her <strong>identity</strong> at Cleanverse, and a second verified wallet B — that's all Rebind needs. <em>Nothing is frozen yet:</em> the asset only locks in the next step, the instant the recovery claim opens.",
-      `<button class="ghost" onclick="run('compromise')">Alice's key is compromised →</button>`);
+  else if(id==="compromise"){
+    s.innerHTML=view("Alice's key is lost",
+      "The private key for wallet A is gone — lost, phished, or leaked. In an ordinary system the asset is now stranded, or drained. Alice still controls her <strong>identity</strong> at Cleanverse and a second verified wallet, and that is all Rebind needs. <em>Nothing is frozen yet:</em> the asset locks in the next step, the instant a claim opens.",
+      `<button class="ghost" onclick="run('compromise')">Mark the key compromised</button>`);
   }
-  else if(step===3){
+  else if(id==="claim"){
     s.innerHTML=view("Alice opens a recovery claim from wallet B",
-      "The attestor asks Cleanverse whether A and B share one customerId. They do — so it signs an EIP-712 attestation and opens a claim. The moment the claim opens, <strong>wallet A is frozen</strong>: a stolen key can no longer move the asset while the claim is reviewed.",
-      `<button onclick="run('claim')">Prove identity &amp; open claim</button>`);
+      "The attestor asks Cleanverse whether A and B share one customerId. They do, so it signs an EIP-712 attestation and opens a claim. The moment that claim opens, <strong>wallet A freezes</strong> — a stolen key cannot move the asset while the claim is under review.",
+      `<button onclick="run('claim')">Prove identity and open a claim</button>`);
   }
-  else if(step===4){
+  else if(id==="review"){
     // BRANCH
+    const genuineAction = rejected
+      ? `<button class="ghost" onclick="run('reopen')">Open a genuine claim</button>`
+      : advance.enabled
+        // Committing is the stronger statement, and the one that unlocks
+        // borrowing: it approves the claim AND gives up the right to cancel it.
+        ? `<button onclick="run('commit')">Underwrite: approve and waive cancellation</button>
+           <div class="hint">Irrevocable. After this the claim will settle, and even the issuer cannot stop it.</div>`
+        : `<button id="execBtn" onclick="run('approve')" disabled>Approve and recover A → B</button>
+           <div class="hint" id="execHint">Unlocks when the challenge window ends.</div>`;
+
     s.innerHTML=`
-      <h2>Issuer review — the challenge window</h2>
-      <p class="lead">Wallet A is frozen. Now the claim is scrutinised. Two outcomes, and Rebind's key property: the issuer can <em>reject</em> a claim or <em>approve</em> one, but can never <em>manufacture</em> one — the identity evidence comes from Cleanverse, which the issuer doesn't control.</p>
-      <div class="ring" style="margin-bottom:20px">
-        <svg width="92" height="92" viewBox="0 0 92 92">
-          <circle class="track" cx="46" cy="46" r="40"></circle>
-          <circle class="prog" id="ringP" cx="46" cy="46" r="40" stroke-dasharray="251.3" stroke-dashoffset="0"></circle>
-        </svg>
-        <div class="ringtxt"><div class="t" id="timer">—</div><div class="s" id="timerLbl">challenge window</div></div>
-      </div>
-      <div class="hint" style="margin:-8px 0 18px">Demo window: 30 seconds. The countdown is live — recovery unlocks automatically when the window elapses.</div>
+      <h2>Issuer review</h2>
+      <p class="lead">Wallet A is frozen and the claim is now scrutinised. Two outcomes — and the property that matters: the issuer can <em>reject</em> a claim or <em>approve</em> one, but can never <em>manufacture</em> one, because the identity evidence comes from Cleanverse.</p>
+      ${ringMarkup()}
+      <p class="hint" style="margin:0 0 6px">Window is ${fmtWindow(cureWindow)} as deployed. In production this would be 24 hours or more, so a human reviewer has time to catch a fraudulent claim before it becomes executable.</p>
       <div class="branch">
         <div class="lane fraud ${rejected?'dim':''}" id="laneFraud">
-          <h4>🛑 Fraudulent claim</h4>
+          <h4>Fraudulent claim</h4>
           <p>${rejected
-              ? "Rejected. The issuer flagged this as an impersonation attempt. Wallet A has been <strong>unfrozen</strong> and no funds moved."
-              : "A reviewer suspects an impersonator opened this claim to hijack Alice's wallet. The issuer rejects it — <code>cancel()</code> restores wallet A."}</p>
-          ${rejected?'':`<button class="danger" onclick="run('reject')">Reject as fraud → unfreeze A</button>`}
+              ? "Rejected. The issuer flagged this as impersonation. Wallet A has been <strong>unfrozen</strong> and nothing moved."
+              : "Suppose an impersonator opened this claim to hijack Alice's wallet. The issuer rejects it, and <code>cancel()</code> restores wallet A."}</p>
+          ${rejected?'':`<button class="danger" onclick="run('reject')">Reject as fraud</button>`}
         </div>
-        <div class="lane legit ${rejected?'':''}" id="laneLegit">
-          <h4>✅ Genuine recovery</h4>
+        <div class="lane legit" id="laneLegit">
+          <h4>Genuine recovery</h4>
           <p>${rejected
-              ? "Want to see the other path? Open a fresh genuine claim — B still shares Alice's identity, and A is active again."
-              : "It really is Alice. After the challenge window elapses, the issuer approves and the executor moves the asset from A to B."}</p>
-          ${rejected
-            ? `<button class="ghost" onclick="run('reopen')">Open a genuine claim</button>`
-            : `<button id="execBtn" onclick="run('approve')" disabled>Approve &amp; recover A → B</button>
-               <div class="hint" id="execHint">Unlocks when the challenge window ends.</div>`}
+              ? "Want the other path? Open a fresh, genuine claim — B still shares Alice's identity, and A is active again."
+              : advance.enabled
+                ? "It really is Alice. The issuer underwrites the claim, which is what makes it something a lender can safely advance against."
+                : "It really is Alice. Once the challenge window elapses, the issuer approves and the executor moves the asset from A to B."}</p>
+          ${genuineAction}
         </div>
       </div>`;
     if(!rejected) startTimer();
   }
-  else if(step===5){
-    const moved = lastTx!=null;
+  else if(id==="advance"){
+    const q=adv?.quote, drawn=adv?.advance?.drawn;
+    const ltv=(advance.ltvBps||0)/100, fee=(advance.feeBps||0)/100;
+
     s.innerHTML=`
-      <h2>${moved?"Recovered ✓":"Claim rejected — asset safe ✓"}</h2>
+      <h2>${drawn?"Advance drawn — the wait costs her nothing":"Alice needs her money before the window ends"}</h2>
+      <p class="lead">${drawn
+        ? `Alice holds <strong>${q?.principalStable??"—"} ${advance.stableSymbol}</strong> now, against an asset she still cannot touch. When the claim settles, the vault takes <strong>${adv?.advance?.dueNote??"—"} NOTE</strong> straight out of the recovery and she keeps the rest. She never has to remember to repay, and never gets the chance not to.`
+        : `The freeze protects the asset and strands the owner equally — over a 48-hour window that is the difference between "my recovery is proceeding" and "I cannot make rent". She is not poor, she is illiquid against a receivable that is about to settle. Because the issuer has now <em>committed</em>, that receivable is something a lender can price.`}</p>
+      ${ringMarkup()}
+      <div class="branch">
+        <div class="lane legit">
+          <h4>${drawn?"Outstanding advance":"Available now"}</h4>
+          <p>
+            Claim value <strong>${adv?.claimNote??"—"} NOTE</strong> ·
+            advance at ${ltv}% LTV <strong>${q?.principalStable??"—"} ${advance.stableSymbol}</strong> ·
+            repaid at settlement <strong>${(drawn?adv?.advance?.dueNote:q?.dueNote)??"—"} NOTE</strong>
+            (${fee}% fee). The ${100-ltv}% gap is the vault's safety margin.
+          </p>
+          ${drawn
+            ? `<div class="hint">Drawn. Repayment is intercepted during execution, not requested afterwards.</div>`
+            : `<button onclick="run('drawAdvance')">Draw ${q?.principalStable??""} ${advance.stableSymbol}</button>
+               <div class="hint">Signed by wallet B and relayed — the borrower never needs gas.</div>`}
+        </div>
+        <div class="lane fraud">
+          <h4>Settle the recovery</h4>
+          <p>Once the window elapses the executor moves the balance, splitting it between the vault and wallet B in a single transaction.</p>
+          <button id="execBtn" onclick="run('approve')" disabled>Recover A → B</button>
+          <div class="hint" id="execHint">Unlocks when the challenge window ends.</div>
+        </div>
+      </div>`;
+    startTimer();
+  }
+  else if(id==="done"){
+    const moved = recovered;
+    const split = lastSplit;
+    s.innerHTML=`
+      <h2>${moved?"Recovered":"Claim rejected — the asset is safe"}</h2>
       <p class="lead">${moved
-        ? "The challenge window elapsed, the issuer approved, and the executor moved the full balance from the frozen wallet A into wallet B. Same owner, new key — and the issuer could only approve what Cleanverse's records already backed."
-        : "The claim was rejected during review and wallet A was restored. Nothing moved. The freeze-then-review design means a bad claim costs the attacker everything and the victim nothing."}</p>
-      <div class="hint" style="margin-top:16px">Reload the page to run again with a fresh customerId. A full on-chain reset needs a redeploy.</div>`;
+        ? "The challenge window elapsed, the issuer approved, and the executor moved the balance out of the frozen wallet A into wallet B. Same owner, new key — and the issuer could only approve what Cleanverse's records already backed."
+        : "The claim was rejected during review and wallet A was restored. Nothing moved. Freezing before reviewing means a bad claim costs the attacker everything and the victim nothing."}</p>
+      ${moved && split ? `
+      <div class="branch">
+        <div class="lane legit">
+          <h4>Settled in one transaction</h4>
+          <p>
+            Recovered <strong>${split.total} NOTE</strong> ·
+            to the vault <strong>${split.toVault} NOTE</strong> ·
+            to wallet B <strong>${split.toWallet} NOTE</strong>.
+          </p>
+          <div class="hint">Alice had already spent the advance. The loan repaid itself out of the recovery, with no repayment step she could miss or refuse.</div>
+        </div>
+      </div>` : ""}
+      <p class="hint">Reloading resumes this finished run rather than restarting it: bindings are deliberately immutable, so wallet A cannot be re-registered. A fresh run needs a redeploy — <code>npm run deploy:local</code>, then restart the server.</p>`;
   }
   renderRail();
 }
@@ -290,27 +755,19 @@ async function run(action){
   const btns=document.querySelectorAll(".stage button"); btns.forEach(b=>b.disabled=true);
   try{
     if(action==="register"){
-      const gInput=document.getElementById("guardianInput");
-      const guardianAddress=(gInput?gInput.value.trim():W.G)||"";
-      if(!guardianAddress||!/^0x[0-9a-fA-F]{40}$/.test(guardianAddress)){
-        log("Registration refused: Guardian wallet address is required and must be a valid Ethereum address.","l-err");
-        btns.forEach(b=>b.disabled=false);
-        return;
-      }
-      W.G=guardianAddress;
-      if(document.getElementById("aG")) document.getElementById("aG").textContent=guardianAddress;
-      log("registering A-Pass for wallet A with nominated guardian…","l-info");
+      log("registering A-Pass for wallet A…","l-info");
+      // The guardian is nominated at registration and is required to co-sign
+      // any future recovery claim, so a compromised attestor key is not enough
+      // on its own to forge one.
+      const guardianAddress=W.G;
       let r=await post("/api/register",{customerId:CID,address:W.A,guardianAddress});
-      log(`wallet A verified · A-Pass under ${CID} · guardian set`,"l-ok");
-
-      // Brief pause to allow Cleanverse UAT database to commit before second wallet
-      await new Promise(res=>setTimeout(res,600));
-
+      log(`guardian nominated · ${guardianAddress}`,"l-dim");
+      log(`wallet A verified · A-Pass under ${CID}`,"l-ok");
       r=await post("/api/register",{customerId:CID,address:W.B,override:true,guardianAddress});
       log(`wallet B bound to the SAME customerId${r.cleanverse?.cvRecordId?` · record ${r.cleanverse.cvRecordId}`:""}`,"l-ok");
       r=await post("/api/mint",{to:W.A,amount:250});
       log(`minted 250 NOTE to wallet A · ${short(r.txHash)}`,"l-ok");
-      step=1;
+      goTo("steal");
     }
     else if(action==="steal"){
       log("attacker attempts transfer  A → attacker…","l-info");
@@ -318,23 +775,37 @@ async function run(action){
       log(`BLOCKED — on-chain code ${r.onchain.code}: ${r.onchain.reason}`,"l-err");
       if(r.cleanverse?.reason) log(`Cleanverse verify_apass: ${r.cleanverse.reason}`,"l-err");
       log("the compliance gate refused the transfer.","l-ok");
-      step=2;
+      goTo("compromise");
     }
     else if(action==="compromise"){
       log("wallet A private key lost / compromised (scenario event — no on-chain change).","l-warn");
       log("asset is safe (gate blocks theft) but stuck — Alice can't move it either. Nothing is frozen yet.","l-dim");
-      step=3;
+      goTo("claim");
     }
     else if(action==="claim"){
       log("proving identity equivalence via query_apass_list…","l-info");
-      log("collecting mandatory guardian co-signature (4th defense layer)…","l-info");
       const r=await post("/api/claim",{customerId:CID,oldWallet:W.A,newWallet:W.B});
       claimId=r.claimId; rejected=false; windowElapsed=false; totalWindow=null;
-      log(`equivalence confirmed · both wallets → one customerId`,"l-ok");
-      log(`guardian co-signature verified against on-chain guardianOf`,"l-ok");
+      log("equivalence confirmed · both wallets → one customerId","l-ok");
+      log("guardian co-signature collected and verified against guardianOf","l-ok");
       log(`claim #${claimId} opened · wallet A FROZEN · ${short(r.txHash)}`,"l-ok");
       document.getElementById("claimchip").textContent=`claim #${claimId}`;
-      step=4;
+      goTo("review");
+    }
+    else if(action==="commit"){
+      log("issuer review passed — underwriting the claim…","l-info");
+      const r=await post("/api/commit",{claimId});
+      log(`commit() executed · the issuer can no longer cancel this claim · ${short(r.txHash)}`,"l-ok");
+      log("the claim is now a receivable a lender can price.","l-dim");
+      await refreshAdvance();
+      goTo("advance");
+    }
+    else if(action==="drawAdvance"){
+      log("wallet B signs an advance authorisation (no gas needed)…","l-info");
+      const r=await post("/api/advance/draw",{claimId});
+      log(`advance drawn · ${r.received} ${advance.stableSymbol} to wallet B · ${short(r.txHash)}`,"l-ok");
+      log(`${r.dueNote} NOTE will be taken from the recovery at settlement.`,"l-dim");
+      await refreshAdvance();
     }
     else if(action==="reject"){
       log("issuer review: claim flagged as fraudulent impersonation…","l-warn");
@@ -345,10 +816,9 @@ async function run(action){
       // stay on step 4 to show the resolved fraud lane + offer genuine path
     }
     else if(action==="reopen"){
-      log("opening a fresh, genuine recovery claim with guardian co-signature…","l-info");
+      log("opening a fresh, genuine recovery claim…","l-info");
       const r=await post("/api/claim",{customerId:CID,oldWallet:W.A,newWallet:W.B});
       claimId=r.claimId; rejected=false; windowElapsed=false; totalWindow=null;
-      log(`guardian co-signature verified against on-chain guardianOf`,"l-ok");
       log(`claim #${claimId} opened · wallet A FROZEN · ${short(r.txHash)}`,"l-ok");
       document.getElementById("claimchip").textContent=`claim #${claimId}`;
     }
@@ -362,98 +832,180 @@ async function run(action){
       log("waiting for approval to propagate on-chain…","l-dim");
       let ready=false;
       for(let i=0;i<10;i++){
-        const st=await fetch(`${API}/api/claim/${claimId}`).then(x=>x.json()).catch(()=>null);
-        if(st?.ok && st.executable){ ready=true; break; }
+        const st=await getJSON(`/api/claim/${claimId}`);
+        if(st?.executable){ ready=true; break; }
         await new Promise(res=>setTimeout(res,1500));
       }
       if(!ready) log("still propagating — attempting execution anyway…","l-warn");
       log("executor moving balance  A → B…","l-info");
       const r=await post("/api/execute",{claimId});
-      lastTx=r.txHash;
-      log(`RECOVERED · A: ${r.oldBalance} · B: ${r.newBalance} · ${short(r.txHash)}`,"l-ok");
-      stopTimer(); step=5;
+      lastTx=r.txHash; recovered=true; lastSplit=r.split||null;
+      if(r.split){
+        log(`advance repaid from the recovery · ${r.split.toVault} NOTE to the vault`,"l-ok");
+      }
+      log(`RECOVERED · A: ${units(r.oldBalance)} NOTE · B: ${units(r.newBalance)} NOTE · ${short(r.txHash)}`,"l-ok");
+      stopTimer(); goTo("done");
     }
   }catch(e){ log("ERROR "+e.message,"l-err"); }
   renderStage(); refresh();
 }
 
-/* ---------- challenge-window timer ---------- */
+/* ---------- challenge-window timer + ring ---------- */
 function stopTimer(){ clearInterval(timerInt); timerInt=null; }
-let localRemaining=null;
-
-function triggerWindowElapsed(){
-  windowElapsed=true;
-  const b=document.getElementById("execBtn"), h=document.getElementById("execHint"), l=document.getElementById("timerLbl"), tEl=document.getElementById("timer");
-  if(tEl) tEl.textContent="00:00";
-  if(b){ b.disabled=false; b.classList.add("flash"); }
-  if(h){ h.textContent="Window elapsed — issuer may now approve and recover."; h.style.color="var(--green)"; }
-  if(l){ l.textContent="window elapsed"; }
-  const ring=document.getElementById("ringP");
-  if(ring){ ring.setAttribute("stroke",getComputedStyle(document.documentElement).getPropertyValue('--green')); ring.setAttribute("stroke-dashoffset","0"); }
-  log("challenge window elapsed — recovery is now executable.","l-ok");
-}
-
 function startTimer(){
   stopTimer();
-  localRemaining=null;
   timerInt=setInterval(async()=>{
     if(claimId===null||step!==4||rejected){ return; }
-    let r; try{ r=await fetch(`${API}/api/claim/${claimId}`).then(x=>x.json()); }catch{ return; }
-    if(!r.ok) return;
-    let t=r.timeRemaining;
-    if(totalWindow===null) totalWindow=Math.max(t,1);
-    if(localRemaining===null) localRemaining=t;
-    else localRemaining=Math.max(0,localRemaining-1);
-
-    if(localRemaining<=0 && t>0){
-      try{ await post("/api/advance-time",{seconds:t+10}); }catch(e){}
-      t=0;
-    } else {
-      t=Math.min(t,localRemaining);
-    }
-
+    const r=await getJSON(`/api/claim/${claimId}`);
+    if(!r) return;
+    const t=r.timeRemaining;
+    // Seed from the deployed window, not the first reading: a resumed session
+    // starts mid-window and would otherwise draw the ring from empty.
+    if(totalWindow===null) totalWindow=cureWindow||Math.max(t,1);
     const tEl=document.getElementById("timer"); if(!tEl) return;
-    tEl.textContent = t>0 ? `${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")}` : "00:00";
+    tEl.textContent = t>0 ? `${pad2(Math.floor(t/60))}:${pad2(t%60)}` : "00:00";
     const ring=document.getElementById("ringP");
-    if(ring){ const frac=Math.min(1,Math.max(0,1-t/totalWindow)); ring.setAttribute("stroke-dashoffset",(251.3*frac).toFixed(1)); }
+    if(ring){ const frac=Math.min(1,Math.max(0,1-t/totalWindow)); ring.setAttribute("stroke-dashoffset",(226.2*frac).toFixed(1)); }
     if(t<=0 && !windowElapsed){
-      triggerWindowElapsed();
+      windowElapsed=true;
+      const b=document.getElementById("execBtn"), h=document.getElementById("execHint"), l=document.getElementById("timerLbl");
+      if(b) b.disabled=false;
+      if(h){ h.textContent="Window elapsed — the issuer may now approve and recover."; h.style.color="var(--good)"; }
+      if(l) l.textContent="window elapsed";
+      if(ring) ring.setAttribute("stroke","var(--good)");
+      log("challenge window elapsed — recovery is now executable.","l-info");
     }
   },1000);
 }
 
 /* ---------- live wallet state ---------- */
 async function refresh(){
-  const q=Object.values(W).join(",");
-  let r; try{ r=await fetch(`${API}/api/state?wallets=${q}`).then(x=>x.json()); }catch{ return; }
-  if(!r.ok) return;
+  if(!W.A) return;
+  const q=[W.A,W.B,W.X].filter(Boolean).join(",");
+  const r=await getJSON(`/api/state?wallets=${q}`);
+  if(!r) return;
   if(r.contracts) document.getElementById("chain").textContent=`chain ${r.contracts.chainId} · token ${r.contracts.token.slice(0,10)}…`;
-  const map={A:["aA","bA","pA","cardA"],B:["aB","bB","pB","cardB"],G:["aG","bG","pG","cardG"],X:["aX","bX","pX","cardX"]};
-  for(const [k,addr] of Object.entries(W)){
+  // Only the three asset-holding wallets have cards. The guardian is a
+  // co-signer, not a holder, so it is shown as a line below the ledger.
+  const map={A:["aA","bA","pA","cardA"],B:["aB","bB","pB","cardB"],X:["aX","bX","pX","cardX"]};
+  for(const k of Object.keys(map)){
+    const addr=W[k]; if(!addr) continue;
     const s=r.wallets?.[addr]||{}; const [aid,bid,pid,cid]=map[k];
-    const elA=document.getElementById(aid); if(elA) elA.textContent=addr;
-    const bEl=document.getElementById(bid);
-    const p=document.getElementById(pid), card=document.getElementById(cid);
-    if(k==="G"){
-      if(p){ p.textContent="CO-SIGNER"; p.className="pill"; p.style="background:rgba(155,140,255,.16);color:var(--violet)"; }
-      continue;
-    }
+    document.getElementById(aid).textContent=addr;
     const bal=parseFloat(s.balance||0);
-    if(bEl){
-      bEl.innerHTML=`${bal.toLocaleString()}<small>NOTE</small>`;
-      bEl.className="bal"+(bal>0?" pos":" zero");
-    }
-    if(p && card){
-      if(s.revoked){ p.textContent="frozen"; p.className="pill bad"; card.classList.add("frozen"); }
-      else if(s.active){ p.textContent="verified"; p.className="pill ok"; card.classList.remove("frozen"); }
-      else { p.textContent="unverified"; p.className="pill off"; card.classList.remove("frozen"); }
-      if(k==="B" && bal>0) card.classList.add("win");
-    }
+    const bEl=document.getElementById(bid);
+    bEl.innerHTML=`${bal.toLocaleString()}<small>Note</small>`;
+    bEl.className="bal"+(bal>0?" pos":" zero");
+    const p=document.getElementById(pid), card=document.getElementById(cid);
+    if(s.revoked){ p.textContent="frozen"; p.className="pill bad"; card.classList.add("frozen"); }
+    else if(s.active){ p.textContent="verified"; p.className="pill ok"; card.classList.remove("frozen"); }
+    else { p.textContent="unverified"; p.className="pill off"; card.classList.remove("frozen"); }
+    if(k==="B" && bal>0) card.classList.add("win");
   }
 }
 
+/* ---------- bridge advance state ---------- */
+/**
+ * The vault's view of the current claim: what it would lend, and whether an
+ * advance is already outstanding. Also carries the claim's note value so the
+ * advance beat can show what the LTV is a percentage of.
+ */
+async function refreshAdvance(){
+  if(!advance.enabled || claimId===null){ adv=null; return; }
+  adv=await getJSON(`/api/advance/${claimId}`);
+  if(adv && W.A){
+    const st=await getJSON(`/api/state?wallets=${W.A}`);
+    adv.claimNote=st?.wallets?.[W.A]?.balance ?? null;
+  }
+}
+
+/* ---------- resume ---------- */
+/**
+ * Rebuild the step from chain state.
+ *
+ * Progress used to live only in this page's memory, so a reload dropped you at
+ * "Register & mint" while the chain still held 250 NOTE, an active binding and
+ * possibly an open claim — and clicking through again minted a second 250.
+ *
+ * Beats 2 and 3 leave no trace to read back: the blocked transfer is a
+ * read-only preflight and "key compromised" is pure narration. A resumed
+ * session therefore lands on the last beat the chain can actually prove.
+ */
+async function resume(){
+  const st=await getJSON(`/api/state?wallets=${Object.values(W).join(",")}`);
+  if(!st) return false;
+
+  if(st.claimCount>0){
+    const id=st.claimCount-1;
+    const c=await getJSON(`/api/claim/${id}`);
+    if(c){
+      claimId=id;
+      document.getElementById("claimchip").textContent=`claim #${id}`;
+      if(c.claim.executed){
+        recovered=true;
+        // Rebuild the settlement split so a reload still shows how the
+        // recovery was divided; previewSplit reports nothing once the advance
+        // is settled, so it comes from the advance record instead.
+        if(advance.enabled){
+          await refreshAdvance();
+          const a=adv?.advance;
+          if(a?.drawn){
+            const kept=parseFloat(st.wallets?.[W.B]?.balance||0);
+            const toVault=parseFloat(a.dueNote||0);
+            lastSplit={
+              total:(kept+toVault).toLocaleString(),
+              toVault:a.dueNote,
+              toWallet:String(kept),
+            };
+          }
+        }
+        goTo("done"); return true;
+      }
+      if(c.claim.cancelled){ rejected=true;  goTo("review"); return true; }
+
+      // A committed claim has passed review and is what the vault lends
+      // against, so a resumed session belongs on the advance beat.
+      if(advance.enabled && c.claim.committed){
+        await refreshAdvance();
+        goTo("advance");
+        return true;
+      }
+      goTo("review"); return true;
+    }
+  }
+
+  const balA=parseFloat(st.wallets?.[W.A]?.balance||0);
+  goTo(balA>0?"steal":"register");
+  return balA>0;
+}
+
 /* ---------- boot ---------- */
-renderStage(); refresh(); setInterval(refresh,4000);
+async function boot(){
+  const cfg=await getJSON("/api/config");
+  if(!cfg){
+    log("cannot reach the backend — see the notice above.","l-err");
+    renderStage();
+    return;
+  }
+
+  W=cfg.wallets;
+  advance=cfg.advance||{enabled:false};
+  buildBeats();
+  if(W.G) document.getElementById("aG").textContent=W.G;
+  else document.getElementById("guardianRow").style.display="none";
+  cureWindow=cfg.cureWindow;
+  CID=sessionCustomerId(cfg.token);
+  document.getElementById("footMode").textContent=cfg.localMode?"local demo mode":`chain ${cfg.chainId}`;
+  if(cfg.localMode) log("local demo mode — Hardhat node, in-memory Cleanverse stub.","l-dim");
+
+  if(await resume()) log(`resumed from chain state at step ${pad2(step+1)} of ${pad2(BEATS.length)}.`,"l-info");
+
+  renderStage();
+  refresh();
+  setInterval(refresh,4000);
+}
+
+boot();
 </script>
 </body>
 </html>

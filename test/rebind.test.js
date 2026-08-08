@@ -65,8 +65,13 @@ describe("Rebind", function () {
     queue = await (await ethers.getContractFactory("RecoveryQueue"))
       .deploy(await registry.getAddress(), attestor.address, admin.address, CURE);
 
+    // No vault: these tests cover recovery on its own, and address(0) is the
+    // supported "bridge advances disabled" configuration.
     executor = await (await ethers.getContractFactory("RebindExecutor"))
-      .deploy(await queue.getAddress(), await token.getAddress(), await registry.getAddress());
+      .deploy(
+        await queue.getAddress(), await token.getAddress(), await registry.getAddress(),
+        ethers.ZeroAddress
+      );
 
     await token.connect(admin).setExecutor(await executor.getAddress());
     await queue.connect(admin).setExecutor(await executor.getAddress());

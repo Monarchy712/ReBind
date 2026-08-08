@@ -18,9 +18,20 @@ module.exports = {
     },
   },
   networks: {
+    hardhat: {},
+    // Local demo chain: `npx hardhat node`. Accounts are left as the node's own
+    // (remote) unlocked accounts so scripts/fund-local.js can top up the .env
+    // keys without any private key being written down anywhere.
     localhost: {
-      url: process.env.RPC_URL || "http://127.0.0.1:8545",
+      url: process.env.LOCAL_RPC || "http://127.0.0.1:8545",
+      chainId: 31337,
+    },
+    // Same chain, but signing as DEPLOYER_PK — what deploy.js needs so the
+    // contracts are owned by the key the backend later runs as.
+    localdemo: {
+      url: process.env.LOCAL_RPC || "http://127.0.0.1:8545",
       accounts: PK ? [PK] : [],
+      chainId: 31337,
     },
     baseSepolia: {
       url: process.env.RPC_URL || "https://sepolia.base.org", 
