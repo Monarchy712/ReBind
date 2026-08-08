@@ -34,6 +34,16 @@ const EIP712_TYPES = {
   ],
 };
 
+const GUARDIAN_EIP712_TYPES = {
+  GuardianRecoveryClaim: [
+    { name: "personId", type: "bytes32" },
+    { name: "oldWallet", type: "address" },
+    { name: "newWallet", type: "address" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+};
+
 /**
  * Opaque commitment, not a reversible customer-ID hash. The secret must be
  * retained by the attestor service; do not put it in frontend code or deploy it.
@@ -144,7 +154,7 @@ class Attestor {
 
     const signature = await guardianSigner.signTypedData(
       this.domain(),
-      EIP712_TYPES,
+      GUARDIAN_EIP712_TYPES,   // <-- distinct type
       { personId, oldWallet, newWallet, nonce, deadline }
     );
 
@@ -167,11 +177,11 @@ async function signGuardianClaim({ privateKey, queueAddress, chainId, customerId
   };
   const signature = await guardianSigner.signTypedData(
     domain,
-    EIP712_TYPES,
+    GUARDIAN_EIP712_TYPES,
     { personId, oldWallet, newWallet, nonce, deadline }
   );
   return { personId, oldWallet, newWallet, nonce, deadline, signature, guardian: guardianSigner.address };
 }
 
-module.exports = { Attestor, personIdOf, EIP712_TYPES, signGuardianClaim };
+module.exports = { Attestor, personIdOf, EIP712_TYPES, GUARDIAN_EIP712_TYPES, signGuardianClaim };
 

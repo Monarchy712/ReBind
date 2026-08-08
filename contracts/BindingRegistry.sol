@@ -60,6 +60,9 @@ contract BindingRegistry is AccessControl {
     event WalletRevoked(address indexed wallet, string reason);
     event WalletRestored(address indexed wallet);
     event RecoveryQueueSet(address indexed recoveryQueue);
+    error GuardianCannotBeAttestor(address guardian);
+    error GuardianCannotBeWallet(address guardian);
+    error GuardianMismatch(address expected, address supplied);
 
     error AlreadyBound(address wallet);
     error NotBound(address wallet);
@@ -108,10 +111,27 @@ contract BindingRegistry is AccessControl {
         if (guardian == address(0)) revert MissingGuardian();
         if (identityCommitment == bytes32(0) || _identityOf[wallet] != bytes32(0)) revert AlreadyBound(wallet);
 
+        // A guardian who is also the attestor collapses two of the four
+        // independent security layers into one signer.
+        if (hasRole(ATTESTOR_ROLE, guardian)) revert GuardianCannotBeAttestor(guardian);
+
+        // A guardian who IS the wallet being recovered can co-sign their own
+        // theft — the whole point of the guardian is to be a second, independent
+        // party.
+        if (guardian == wallet) revert GuardianCannotBeWallet(guardian);
+
+        // Guardian is set once per identity and is immutable through this path.
+        // See "guardian immutability" fix below.
+        address existingGuardian = guardianOf[identityCommitment];
+        if (existingGuardian == address(0)) {
+            guardianOf[identityCommitment] = guardian;
+            emit GuardianSet(identityCommitment, guardian);
+        } else if (existingGuardian != guardian) {
+            revert GuardianMismatch(existingGuardian, guardian);
+        }
+
         _identityOf[wallet] = identityCommitment;
-        guardianOf[identityCommitment] = guardian;
         emit WalletBound(wallet);
-        emit GuardianSet(identityCommitment, guardian);
     }
 
     /**

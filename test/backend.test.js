@@ -19,7 +19,7 @@ process.env.CV_API_ID = "APPTESTID0000000000";
 process.env.CV_API_KEY = TEST_KEY;
 process.env.CV_BASE_URL = "https://uatapi.example.invalid/api/cooperate";
 const cv = require("../backend/cleanverse");
-const { Attestor, personIdOf, EIP712_TYPES, signGuardianClaim } = require("../backend/attestor");
+const { Attestor, personIdOf, GUARDIAN_EIP712_TYPES, EIP712_TYPES, signGuardianClaim } = require("../backend/attestor");
 
 /** Swap in a canned response for the next fetch, and capture what was sent. */
 function stubFetch(payload, { status = 200 } = {}) {
@@ -389,7 +389,7 @@ describe("Backend", function () {
 
       const recovered = ethers.verifyTypedData(
         { name: "Rebind", version: "1", chainId: 84532, verifyingContract: QUEUE },
-        EIP712_TYPES,
+        GUARDIAN_EIP712_TYPES,
         { personId: gRes.personId, oldWallet: OLD, newWallet: NEW, nonce: 0, deadline: gRes.deadline },
         gRes.signature
       );
@@ -425,7 +425,7 @@ describe("Backend", function () {
       );
       const recoveredGuardian = ethers.verifyTypedData(
         { name: "Rebind", version: "1", chainId: 84532, verifyingContract: QUEUE },
-        EIP712_TYPES,
+        GUARDIAN_EIP712_TYPES,
         { personId: gSig.personId, oldWallet: OLD, newWallet: NEW, nonce: 0, deadline: gSig.deadline },
         gSig.signature
       );
@@ -449,7 +449,7 @@ describe("Backend", function () {
 
       const recovered = ethers.verifyTypedData(
         { name: "Rebind", version: "1", chainId: 84532, verifyingContract: QUEUE },
-        EIP712_TYPES,
+        GUARDIAN_EIP712_TYPES,
         { personId: gRes.personId, oldWallet: OLD, newWallet: NEW, nonce: 3, deadline: gRes.deadline },
         gRes.signature
       );

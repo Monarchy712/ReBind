@@ -43,6 +43,17 @@ let attestor;
     queueAddress: D.queue,
     chainId: Number(net.chainId),
   });
+
+  if (process.env.GUARDIAN_PK) {
+    const guardianAddr = new ethers.Wallet(normalizePrivateKey(process.env.GUARDIAN_PK)).address;
+    if (guardianAddr.toLowerCase() === attestorWallet.address.toLowerCase()) {
+      throw new Error("FATAL: GUARDIAN_PK resolves to the same address as ATTESTOR_PK. These must be independent keys.");
+    }
+    console.log(`  guardian ${guardianAddr}`);
+  } else {
+    console.warn("  WARNING: GUARDIAN_PK not set. /api/claim will require guardianSignature in the request body.");
+  }
+
   console.log(`Rebind backend`);
   console.log(`  chain    ${net.chainId}`);
   console.log(`  token    ${D.token}`);
@@ -59,8 +70,14 @@ const fail = (res, e) => {
 app.post("/api/register", async (req, res) => {
   try {
     const { customerId, address, override, guardianAddress } = req.body;
-    if (!guardianAddress || !ethers.isAddress(guardianAddress) || guardianAddress === ethers.ZeroAddress) {
+        if (!guardianAddress || !ethers.isAddress(guardianAddress) || guardianAddress === ethers.ZeroAddress) {
       throw new Error("guardianAddress is required and must be a valid non-zero address");
+    }
+    if (guardianAddress.toLowerCase() === address.toLowerCase()) {
+      throw new Error("guardianAddress cannot be the same as the wallet being registered");
+    }
+    if (guardianAddress.toLowerCase() === attestorWallet.address.toLowerCase()) {
+      throw new Error("guardianAddress cannot be the attestor's address");
     }
     const identityCommitment = personIdOf(customerId);
 
@@ -132,7 +149,7 @@ app.post("/api/claim", async (req, res) => {
     // the request or pre-seeded in the environment (fallback to attestor test key in demo mode).
     let guardianSig = guardianSignature;
     if (!guardianSig) {
-      const gKey = guardianPrivateKey || process.env.GUARDIAN_PK || process.env.ATTESTOR_PK;
+      const gKey = guardianPrivateKey || process.env.GUARDIAN_PK;
       if (!gKey) throw new Error("Guardian signature or guardian private key is required to open a recovery claim.");
       const gRes = await attestor.signGuardianClaim({
         privateKey: gKey,
@@ -178,7 +195,7 @@ app.post("/api/claim", async (req, res) => {
 app.post("/api/guardian-sign", async (req, res) => {
   try {
     const { customerId, oldWallet, newWallet, nonce, deadline, guardianPrivateKey } = req.body;
-    const privKey = guardianPrivateKey || process.env.GUARDIAN_PK || process.env.ATTESTOR_PK;
+    const privKey = guardianPrivateKey || process.env.GUARDIAN_PK;
     if (!privKey) throw new Error("guardianPrivateKey is required to co-sign");
     const gSig = await attestor.signGuardianClaim({
       privateKey: privKey,
