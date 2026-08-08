@@ -67,20 +67,39 @@ class Attestor {
   /**
    * Ask Cleanverse whether two wallets are the same person.
    * This is the single most important call in the product.
+   *
+   * @param includeWalletList  Internal callers (this file) may want the raw
+   *   list; anything that turns this into an HTTP response should NOT set
+   *   this, since it would let a caller enumerate every wallet bound to a
+   *   customerId — exactly the linkage the opaque on-chain commitment is
+   *   designed to avoid leaking.
    */
-  async proveEquivalence({ customerId, oldWallet, newWallet }) {
+  async proveEquivalence({ customerId, oldWallet, newWallet, includeWalletList = false }) {
+    if (oldWallet.toLowerCase() === newWallet.toLowerCase()) {
+      return {
+        equivalent: false,
+        detail: "oldWallet and newWallet are the same address; nothing to recover",
+      };
+    }
+
     const wallets = await cv.walletsForCustomer(customerId);
     const oldOk = wallets.includes(oldWallet.toLowerCase());
     const newOk = wallets.includes(newWallet.toLowerCase());
 
-    return {
+    const result = {
       equivalent: oldOk && newOk,
-      wallets,
       detail: oldOk
         ? (newOk ? "Both wallets resolve to one Cleanverse customerId"
                  : "New wallet is not bound to this customerId")
         : "Old wallet is not bound to this customerId",
     };
+
+    // Opt-in only. Never forwarded to an API response by default.
+    if (includeWalletList) {
+      result.wallets = wallets;
+    }
+
+    return result;
   }
 
   /**
@@ -88,7 +107,14 @@ class Attestor {
    * @param nonce  MUST equal queue.nonces(newWallet) at submission time.
    */
   async signClaim({ customerId, oldWallet, newWallet, nonce, ttlSeconds = 3600 }) {
-    const proof = await this.proveEquivalence({ customerId, oldWallet, newWallet });
+    if (oldWallet.toLowerCase() === newWallet.toLowerCase()) {
+      throw new Error("Refusing to attest: oldWallet and newWallet are the same address");
+    }
+
+    // Kept internal to this call so the caller of signClaim() (server.js)
+    // still gets the wallet list for its own proof/audit response, without
+    // every consumer of proveEquivalence() getting it by default.
+    const proof = await this.proveEquivalence({ customerId, oldWallet, newWallet, includeWalletList: false });
     if (!proof.equivalent) {
       const e = new Error(`Refusing to attest: ${proof.detail}`);
       e.proof = proof;

@@ -29,12 +29,12 @@ async function attest(queue, attestor, { personId, oldWallet, newWallet, nonce, 
 }
 
 describe("Rebind", function () {
-  let admin, attestor, issuer, alice, aliceNew, bob, attacker;
+  let admin, attestor, issuer, alice, aliceNew, bob, attacker, aliceOther; // added aliceOther
   let registry, token, queue, executor;
   let ALICE_ID, BOB_ID;
 
   beforeEach(async function () {
-    [admin, attestor, issuer, alice, aliceNew, bob, attacker] = await ethers.getSigners();
+    [admin, attestor, issuer, alice, aliceNew, bob, attacker, aliceOther] = await ethers.getSigners(); // added aliceOther
 
     ALICE_ID = ethers.keccak256(ethers.toUtf8Bytes("ALICECUST0001"));
     BOB_ID = ethers.keccak256(ethers.toUtf8Bytes("BOBCUST000001"));
@@ -264,12 +264,13 @@ describe("Rebind", function () {
         .to.be.revertedWithCustomError(queue, "NewWalletNotActive");
     });
 
-    it("REPLAY: the same signature cannot be used twice", async function () {
+        it("REPLAY: the same signature cannot be used twice", async function () {
       const sig = await attest(queue, attestor, {
         personId: ALICE_ID, oldWallet: alice.address,
         newWallet: aliceNew.address, nonce: 0, deadline,
       });
       await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig);
+      await queue.connect(issuer).cancel(0); // free the active-claim slot so this test isolates nonce replay
       // nonce is now 1, so the old signature no longer verifies
       await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig))
         .to.be.revertedWithCustomError(queue, "BadAttestation");
@@ -316,6 +317,112 @@ describe("Rebind", function () {
       await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig);
       await time.increase(CURE + 1);
       expect(await queue.isExecutable(0)).to.equal(false);
+    });
+
+    it("THE FIX: rejects a claim where oldWallet equals newWallet", async function () {
+      const sig = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: alice.address, nonce: 0, deadline,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, alice.address, deadline, sig))
+        .to.be.revertedWithCustomError(queue, "SameWallet")
+        .withArgs(alice.address);
+    });
+
+    it("never freezes the wallet when the same-wallet claim is rejected", async function () {
+      // Before the fix, samePerson(a,a) and isActive(a) both trivially pass,
+      // so this would open a claim and freeze the wallet for no recovery benefit.
+      const sig = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: alice.address, nonce: 0, deadline,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, alice.address, deadline, sig))
+        .to.be.reverted;
+      expect(await registry.revoked(alice.address)).to.equal(false);
+      expect(await queue.claimCount()).to.equal(0n);
+    });
+
+        it("THE FIX: a second, distinct, honestly-signed claim cannot open against an oldWallet that already has one live", async function () {
+      // Alice legitimately controls a third wallet, so this attestation is
+      // just as valid as the first one — it's not a forged or replayed signature.
+      await registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address);
+
+      const sigA = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigA);
+
+      const sigB = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceOther.address, nonce: 0, deadline,
+      });
+      // sigB is a fresh, valid, non-replayed signature — nonce replay
+      // protection alone would let this through. The active-claim guard
+      // is what actually stops it.
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceOther.address, deadline, sigB))
+        .to.be.revertedWithCustomError(queue, "ClaimAlreadyActive")
+        .withArgs(alice.address, 0n);
+    });
+
+    it("does not block a second claim once the first is cancelled", async function () {
+      await registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address);
+
+      const sigA = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigA);
+      await queue.connect(issuer).cancel(0);
+
+      const sigB = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceOther.address, nonce: 0, deadline,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceOther.address, deadline, sigB))
+        .to.emit(queue, "ClaimOpened");
+    });
+
+    it("does not block a second claim once the first is executed", async function () {
+      await token.connect(admin).mint(alice.address, 10n * ONE);
+      await registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address);
+
+      const sigA = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigA);
+      await queue.connect(issuer).approve(0);
+      await time.increase(CURE + 1);
+      await executor.execute(0);
+
+      // alice's balance is now 0, but the guard is about claim exclusivity,
+      // not balance — a fresh claim on the same oldWallet must be allowed
+      // to open again now that the prior one is resolved.
+      const sigB = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceOther.address, nonce: 0, deadline,
+      });
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceOther.address, deadline, sigB))
+        .to.emit(queue, "ClaimOpened");
+    });
+
+    it("does NOT block a claim against a different oldWallet entirely", async function () {
+      const sigAlice = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address,
+        newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      await queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sigAlice);
+
+      await registry.connect(attestor).bindWallet(BOB_ID, aliceOther.address);
+      const sigBob = await attest(queue, attestor, {
+        personId: BOB_ID, oldWallet: bob.address,
+        newWallet: aliceOther.address, nonce: 0, deadline,
+      });
+      // Bob's claim is unrelated to Alice's oldWallet, so it must go through
+      // even while Alice's claim is still active.
+      await expect(queue.openClaim(BOB_ID, bob.address, aliceOther.address, deadline, sigBob))
+        .to.emit(queue, "ClaimOpened");
     });
   });
 

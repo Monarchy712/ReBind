@@ -29,6 +29,15 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
  * move, or burn tokens. If the attestor key were compromised an attacker could
  * assert false bindings, so in production this becomes a multisig, and moves
  * fully on-chain if/when Cleanverse exposes customerId linkage on-chain.
+ *
+ * RECOVERY_ROLE WIRING
+ * ---------------------
+ * BindingRegistry and RecoveryQueue have a circular dependency: the queue
+ * needs the registry's address at construction, and the registry needs to
+ * grant the queue RECOVERY_ROLE. Previously this grant had to be done by hand
+ * after both deploys, which is exactly the kind of step that gets forgotten
+ * in a deploy script. setRecoveryQueue() makes that wiring a single, one-time,
+ * on-chain call instead of a manual grantRole() someone has to remember.
  */
 contract BindingRegistry is AccessControl {
     bytes32 public constant ATTESTOR_ROLE = keccak256("ATTESTOR_ROLE");
@@ -40,18 +49,41 @@ contract BindingRegistry is AccessControl {
     /// wallet => has this binding been revoked?
     mapping(address => bool) public revoked;
 
+    /// Set exactly once. See "RECOVERY_ROLE WIRING" above.
+    address public recoveryQueue;
+
     event WalletBound(address indexed wallet);
     event WalletRevoked(address indexed wallet, string reason);
     event WalletRestored(address indexed wallet);
+    event RecoveryQueueSet(address indexed recoveryQueue);
 
     error AlreadyBound(address wallet);
     error NotBound(address wallet);
     error ZeroAddress();
+    error RecoveryQueueAlreadySet();
 
     constructor(address admin, address attestor) {
         if (admin == address(0) || attestor == address(0)) revert ZeroAddress();
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(ATTESTOR_ROLE, attestor);
+    }
+
+    // --------------------------------------------------------- configuration
+
+    /**
+     * @notice Wire up RecoveryQueue and grant it RECOVERY_ROLE. Callable once.
+     * @dev Deploy order: registry -> queue (using registry's address) ->
+     *      registry.setRecoveryQueue(queue). Immutable after that: a queue
+     *      swap would silently change who can freeze/restore wallets, so it
+     *      requires deploying a new registry rather than repointing this one.
+     */
+    function setRecoveryQueue(address recoveryQueue_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (recoveryQueue_ == address(0)) revert ZeroAddress();
+        if (recoveryQueue != address(0)) revert RecoveryQueueAlreadySet();
+
+        recoveryQueue = recoveryQueue_;
+        _grantRole(RECOVERY_ROLE, recoveryQueue_);
+        emit RecoveryQueueSet(recoveryQueue_);
     }
 
     // ---------------------------------------------------------------- writes

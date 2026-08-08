@@ -339,5 +339,33 @@ describe("Backend", function () {
       expect(att.deadline).to.be.greaterThan(now);
       expect(att.deadline).to.be.at.most(now + 601);
     });
+
+    it("THE FIX: refuses when oldWallet and newWallet are the same address, without calling Cleanverse", async function () {
+      let calledCleanverse = false;
+      cv.walletsForCustomer = async () => { calledCleanverse = true; return [OLD]; };
+
+      let err;
+      try {
+        await attestor.signClaim({
+          customerId: "REBINDALICE001", oldWallet: OLD, newWallet: OLD, nonce: 0,
+        });
+      } catch (e) { err = e; }
+
+      expect(err, "signClaim must throw").to.exist;
+      expect(err.message).to.match(/same address/i);
+      expect(calledCleanverse, "must fail fast, before the Cleanverse round trip").to.equal(false);
+    });
+
+    it("rejects the same-wallet case even when the addresses differ only in checksum casing", async function () {
+      const checksummed = ethers.getAddress(OLD);
+      let err;
+      try {
+        await attestor.signClaim({
+          customerId: "REBINDALICE001", oldWallet: OLD, newWallet: checksummed, nonce: 0,
+        });
+      } catch (e) { err = e; }
+      expect(err).to.exist;
+      expect(err.message).to.match(/same address/i);
+    });
   });
 });
