@@ -390,6 +390,7 @@
         </div>
         <div class="addr" id="aA">…</div>
         <div class="bal zero" id="bA">0<small>Note</small></div>
+        <div id="sA" style="font-family:var(--mono);font-size:12.5px;color:var(--good);margin-top:4px;min-height:16px"></div>
         <div class="ribbon" id="ribA">Key exposed — an attacker may hold this private key.</div>
       </div>
 
@@ -400,6 +401,7 @@
         </div>
         <div class="addr" id="aB">…</div>
         <div class="bal zero" id="bB">0<small>Note</small></div>
+        <div id="sB" style="font-family:var(--mono);font-size:12.5px;color:var(--good);margin-top:4px;min-height:16px"></div>
         <div class="ribbon" id="ribB">Same customerId as wallet A. That shared identity is the whole mechanism.</div>
       </div>
 
@@ -410,6 +412,7 @@
         </div>
         <div class="addr" id="aX">…</div>
         <div class="bal zero" id="bX">0<small>Note</small></div>
+        <div id="sX" style="font-family:var(--mono);font-size:12.5px;color:var(--good);margin-top:4px;min-height:16px"></div>
         <div class="ribbon" id="ribX">No A-Pass. The token refuses it as a destination.</div>
       </div>
     </div>
@@ -855,7 +858,10 @@ function stopTimer(){ clearInterval(timerInt); timerInt=null; }
 function startTimer(){
   stopTimer();
   timerInt=setInterval(async()=>{
-    if(claimId===null||step!==4||rejected){ return; }
+    // The countdown must keep ticking on BOTH the review and advance beats:
+    // in the bridge-advance flow the window is still running while the borrower
+    // draws, and the "Recover A → B" button lives on the advance beat.
+    if(claimId===null||rejected||!["review","advance"].includes(beat())){ return; }
     const r=await getJSON(`/api/claim/${claimId}`);
     if(!r) return;
     const t=r.timeRemaining;
@@ -896,6 +902,10 @@ async function refresh(){
     const bEl=document.getElementById(bid);
     bEl.innerHTML=`${bal.toLocaleString()}<small>Note</small>`;
     bEl.className="bal"+(bal>0?" pos":" zero");
+    // Show the borrowed stablecoin (dUSDC) so it's visible which wallet holds
+    // the advance. Only rendered when non-zero, to keep idle cards clean.
+    const sEl=document.getElementById("s"+k);
+    if(sEl){ const sb=parseFloat(s.stable||0); sEl.textContent = sb>0 ? `+ ${sb.toLocaleString()} dUSDC borrowed` : ""; }
     const p=document.getElementById(pid), card=document.getElementById(cid);
     if(s.revoked){ p.textContent="frozen"; p.className="pill bad"; card.classList.add("frozen"); }
     else if(s.active){ p.textContent="verified"; p.className="pill ok"; card.classList.remove("frozen"); }

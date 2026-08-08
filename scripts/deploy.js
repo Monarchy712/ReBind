@@ -14,6 +14,20 @@ const { ethers } = require("hardhat");
 const CURE_WINDOW = Number(process.env.CURE_WINDOW || 30);
 const privateKey = (value) => value && (value.startsWith("0x") ? value : `0x${value}`);
 
+// Public RPCs (e.g. Base Sepolia) load-balance across replicas, so a read of a
+// just-deployed contract can hit a node that hasn't indexed the new code yet and
+// return empty data (ethers throws BAD_DATA on decode). Retry a read a few times
+// before giving up so deploy-then-read sequences survive that lag.
+async function readWithRetry(fn, tries = 8, delayMs = 2500) {
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      if (i === tries - 1) throw e;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 async function main() {
   const [deployer] = await ethers.getSigners();
   const net = await ethers.provider.getNetwork();
@@ -25,9 +39,15 @@ async function main() {
     throw new Error("Set ATTESTOR_PK or ATTESTOR_ADDRESS in .env.");
   }
 
-  const attestorAddr =
+  const rawAttestorAddr =
     process.env.ATTESTOR_ADDRESS ||
     new ethers.Wallet(privateKey(process.env.ATTESTOR_PK)).address;
+  // Normalise: tolerate a missing 0x prefix in ATTESTOR_ADDRESS and checksum it.
+  // Passing a non-0x string as an address makes ethers treat it as an ENS name
+  // and call resolveName(), which HardhatEthersProvider does not implement.
+  const attestorAddr = ethers.getAddress(
+    rawAttestorAddr.startsWith("0x") ? rawAttestorAddr : `0x${rawAttestorAddr}`
+  );
 
   console.log(`network   ${net.name} (${net.chainId})`);
   console.log(`deployer  ${deployer.address}`);
@@ -89,8 +109,8 @@ async function main() {
       console.log("DemoStablecoin  ", stableAddr);
     }
 
-    const noteDecimals = Number(await token.decimals());
-    const stableDecimals = Number(await stable.decimals());
+    const noteDecimals = Number(await readWithRetry(() => token.decimals()));
+    const stableDecimals = Number(await readWithRetry(() => stable.decimals()));
     oracle = await (await ethers.getContractFactory("ParAdvanceOracle"))
       .deploy(noteDecimals, stableDecimals);
     await oracle.waitForDeployment();
@@ -133,12 +153,29 @@ async function main() {
     const hadRole = await registry.hasRole(attestorRole, deployer.address);
     if (!hadRole) {
       await (await registry.grantRole(attestorRole, deployer.address)).wait();
+      // Wait until the RPC reflects the new role before using it, or the
+      // bindWallet estimateGas below reverts against a lagging replica.
+      await readWithRetry(async () => {
+        if (!(await registry.hasRole(attestorRole, deployer.address))) throw new Error("attestor role not visible yet");
+        return true;
+      });
     }
     const institutionId = ethers.keccak256(ethers.toUtf8Bytes("REBIND_BRIDGE_VAULT_INSTITUTION"));
-    // Every binding needs a guardian. The vault is an institution that never
-    // opens a recovery claim, so its guardian is never called on to co-sign;
-    // it is the issuer purely so the field is answerable by someone real.
-    await (await registry.bindWallet(institutionId, vaultAddr, deployer.address)).wait();
+    // The registry forbids a guardian that holds ATTESTOR_ROLE (GuardianCannotBeAttestor)
+    // and a guardian equal to the wallet. The deployer is acting as the temporary
+    // attestor to write this binding, so it CANNOT also be the vault's guardian.
+    // The vault never opens a recovery claim, so this guardian is never asked to
+    // co-sign — any distinct, non-attestor address satisfies the invariant. Use an
+    // explicitly configured VAULT_GUARDIAN if provided, else a throwaway address.
+    const vaultGuardian = process.env.VAULT_GUARDIAN
+      ? ethers.getAddress(process.env.VAULT_GUARDIAN.startsWith("0x") ? process.env.VAULT_GUARDIAN : `0x${process.env.VAULT_GUARDIAN}`)
+      : ethers.Wallet.createRandom().address;
+    // Guarded retry: idempotent if a prior attempt already bound the wallet.
+    await readWithRetry(async () => {
+      if (await registry.isActive(vaultAddr)) return true;
+      await (await registry.bindWallet(institutionId, vaultAddr, vaultGuardian)).wait();
+      return true;
+    });
     if (!hadRole) {
       await (await registry.renounceRole(attestorRole, deployer.address)).wait();
     }
@@ -151,6 +188,12 @@ async function main() {
       await (await stable.mint(deployer.address, seedUnits)).wait();
     }
     await (await stable.approve(vaultAddr, seedUnits)).wait();
+    // Wait until the allowance is visible before depositLiquidity (which does a
+    // transferFrom) so its estimateGas doesn't revert against a lagging replica.
+    await readWithRetry(async () => {
+      if ((await stable.allowance(deployer.address, vaultAddr)) < seedUnits) throw new Error("allowance not visible yet");
+      return true;
+    });
     await (await vault.depositLiquidity(seedUnits)).wait();
     console.log(`  vault seeded with ${seed} dUSDC`);
   }

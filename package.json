@@ -12,7 +12,7 @@
     "node:local": "hardhat node",
     "fund:local": "node scripts/fund-local.js",
     "deploy:local": "hardhat run scripts/deploy.js --network localdemo",
-    "server:local": "DEMO_MODE=local node backend/server.js",
+    "server:local": "node -e \"process.env.DEMO_MODE='local';require('./backend/server.js')\"",
     "register": "node scripts/register-atoken.js",
     "freeze-test": "node scripts/freeze-scope-test.js",
     "server": "node backend/server.js"
