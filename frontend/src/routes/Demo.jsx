@@ -13,7 +13,7 @@ import { Reveal } from "../components/Reveal.jsx";
 import { useToast } from "../components/Toasts.jsx";
 import { BEAT_TITLES, useRebind } from "../store/RebindProvider.jsx";
 
-function WalletCard({ innerRef, who, role, address, balance, state, note, extraClass = "" }){
+function WalletCard({ innerRef, who, role, address, balance, stable, stableSymbol = "dUSDC", state, note, extraClass = "" }){
   const chip =
     state === "frozen"   ? <span className="chip bad live">frozen</span> :
     state === "verified" ? <span className="chip ok">verified</span> :
@@ -45,6 +45,11 @@ function WalletCard({ innerRef, who, role, address, balance, state, note, extraC
       <div ref={balRef} className={`bal${balance > 0 ? "" : " zero"}`}>
         {num(balance)}<small>Note</small>
       </div>
+      {/* The borrowed stablecoin, so it is visible which wallet is holding the
+          advance. Rendered only when non-zero, to keep idle cards clean. */}
+      {stable > 0 ? (
+        <div className="borrowed">+ {num(stable)} {stableSymbol} borrowed</div>
+      ) : null}
       {note ? <div className="note">{note}</div> : null}
     </div>
   );
@@ -116,6 +121,7 @@ export default function Demo(){
 
   /* --------------------------------------------------------- balances */
   const bal = (k) => parseFloat(S.balances[S.wallets[k]]?.balance || 0);
+  const stable = (k) => parseFloat(S.balances[S.wallets[k]]?.stable || 0);
   const wstate = (k) => {
     const s = S.balances[S.wallets[k]];
     if (!s) return "unknown";
@@ -456,19 +462,22 @@ export default function Demo(){
         <Reveal className="ledger" delay={100}>
           <WalletCard
             innerRef={cardA} who="Alice" role="wallet A · original"
-            address={S.wallets.A} balance={bal("A")} state={wstate("A")}
+            address={S.wallets.A} balance={bal("A")} stable={stable("A")}
+            stableSymbol={S.advance.stableSymbol} state={wstate("A")}
             note={S.atOrPast("compromise") && !S.recovered
               ? "Key exposed — an attacker may hold this private key." : null}
           />
           <WalletCard
             innerRef={cardB} who="Alice" role="wallet B · recovery destination"
-            address={S.wallets.B} balance={bal("B")} state={wstate("B")}
+            address={S.wallets.B} balance={bal("B")} stable={stable("B")}
+            stableSymbol={S.advance.stableSymbol} state={wstate("B")}
             extraClass={bal("B") > 0 ? "won" : ""}
             note="Same customerId as wallet A. That shared identity is the whole mechanism."
           />
           <WalletCard
             innerRef={cardX} who="Attacker" role="unknown party"
-            address={S.wallets.X} balance={bal("X")} state={wstate("X")}
+            address={S.wallets.X} balance={bal("X")} stable={stable("X")}
+            stableSymbol={S.advance.stableSymbol} state={wstate("X")}
             extraClass="foe"
             note="No A-Pass. The token refuses it as a destination."
           />

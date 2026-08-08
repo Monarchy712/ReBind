@@ -188,6 +188,7 @@ const fail = (res, e) => {
 app.post("/api/register", async (req, res) => {
   try {
     const { customerId, address, override, guardianAddress } = req.body;
+    requireAddress(address, "address");
     if (!guardianAddress || !ethers.isAddress(guardianAddress) || guardianAddress === ethers.ZeroAddress) {
       throw new Error("guardianAddress is required and must be a valid non-zero address");
     }
@@ -227,16 +228,37 @@ app.post("/api/register", async (req, res) => {
 app.post("/api/mint", async (req, res) => {
   try {
     const { to, amount } = req.body;
+    requireAddress(to, "to");
+    if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+      throw new Error(`amount must be a positive number, got ${JSON.stringify(amount)}`);
+    }
     const tx = await token.mint(to, ethers.parseUnits(String(amount), 6));
     await tx.wait();
     ok(res, { txHash: tx.hash, balance: (await token.balanceOf(to)).toString() });
   } catch (e) { fail(res, e); }
 });
 
+/**
+ * Reject anything that is not an address before it reaches ethers.
+ *
+ * Without this, a typo in the recovery wizard's address field came back as
+ * "network does not support ENS" — ethers assumes a non-address string is an
+ * ENS name and fails on a chain that has no resolver. That message tells the
+ * person who mistyped nothing at all about what went wrong.
+ */
+function requireAddress(value, label) {
+  if (!value || typeof value !== "string" || !ethers.isAddress(value)) {
+    throw new Error(`${label} is not a valid address: ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
 // ---- 3. pre-flight check (the blocked-theft beat) ---------------------------
 app.post("/api/check", async (req, res) => {
   try {
     const { from, to, amount } = req.body;
+    requireAddress(from, "from");
+    requireAddress(to, "to");
     // ERC-1404 is two calls by design: a cheap numeric code, then the text.
     const value = amount ? ethers.parseUnits(String(amount), 6) : 0n;
     const code = await token.detectTransferRestriction(from, to, value);
@@ -250,6 +272,8 @@ app.post("/api/check", async (req, res) => {
 app.post("/api/claim", async (req, res) => {
   try {
     const { customerId, oldWallet, newWallet, guardianSignature, guardianPrivateKey } = req.body;
+    requireAddress(oldWallet, "oldWallet");
+    requireAddress(newWallet, "newWallet");
 
     const nonce = await queue.nonces(newWallet);
     const block = await provider.getBlock("latest");

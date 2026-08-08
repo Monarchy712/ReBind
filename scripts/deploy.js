@@ -74,6 +74,20 @@ async function deployed(label, contract) {
   return waitForCode(label, await contract.getAddress());
 }
 
+// Public RPCs (e.g. Base Sepolia) load-balance across replicas, so a read of a
+// just-deployed contract can hit a node that hasn't indexed the new code yet and
+// return empty data (ethers throws BAD_DATA on decode). Retry a read a few times
+// before giving up so deploy-then-read sequences survive that lag.
+async function readWithRetry(fn, tries = 8, delayMs = 2500) {
+  for (let i = 0; i < tries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      if (i === tries - 1) throw e;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 async function main() {
   const [deployer] = await ethers.getSigners();
   const net = await ethers.provider.getNetwork();
@@ -292,6 +306,12 @@ async function main() {
       }
     }
     await (await stable.approve(vaultAddr, seedUnits)).wait();
+    // Wait until the allowance is visible before depositLiquidity (which does a
+    // transferFrom) so its estimateGas doesn't revert against a lagging replica.
+    await readWithRetry(async () => {
+      if ((await stable.allowance(deployer.address, vaultAddr)) < seedUnits) throw new Error("allowance not visible yet");
+      return true;
+    });
     await (await vault.depositLiquidity(seedUnits)).wait();
     console.log(`  vault seeded with ${seed} ${stableIsOurs ? "dUSDC" : "units"}`);
   }
