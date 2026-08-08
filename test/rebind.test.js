@@ -28,27 +28,21 @@ async function attest(queue, attestor, { personId, oldWallet, newWallet, nonce, 
   });
 }
 
+const guardianTypes = {
+  GuardianRecoveryClaim: [
+    { name: "personId", type: "bytes32" },
+    { name: "oldWallet", type: "address" },
+    { name: "newWallet", type: "address" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+};
+
 /** Build and sign the EIP-712 RecoveryClaim co-signature with the guardian's key. */
 async function signGuardian(queue, guardian, { personId, oldWallet, newWallet, nonce, deadline }) {
   const net = await ethers.provider.getNetwork();
-  const domain = {
-    name: "Rebind",
-    version: "1",
-    chainId: net.chainId,
-    verifyingContract: await queue.getAddress(),
-  };
-  const types = {
-    RecoveryClaim: [
-      { name: "personId", type: "bytes32" },
-      { name: "oldWallet", type: "address" },
-      { name: "newWallet", type: "address" },
-      { name: "nonce", type: "uint256" },
-      { name: "deadline", type: "uint256" },
-    ],
-  };
-  return guardian.signTypedData(domain, types, {
-    personId, oldWallet, newWallet, nonce, deadline,
-  });
+  const domain = { name: "Rebind", version: "1", chainId: net.chainId, verifyingContract: await queue.getAddress() };
+  return guardian.signTypedData(domain, guardianTypes, { personId, oldWallet, newWallet, nonce, deadline });
 }
 
 describe("Rebind", function () {
@@ -128,6 +122,27 @@ describe("Rebind", function () {
       await registry.connect(attestor).revokeWallet(alice.address, "key compromised");
       expect(await registry.isActive(alice.address)).to.equal(false);
       expect(await registry.samePerson(alice.address, aliceNew.address)).to.equal(true);
+    });
+
+    it("refuses to bind a wallet if the nominated guardian is the attestor", async function () {
+      const freshCust = ethers.keccak256(ethers.toUtf8Bytes("FRESHCUST999"));
+      await expect(
+        registry.connect(attestor).bindWallet(freshCust, attacker.address, attestor.address)
+      ).to.be.revertedWithCustomError(registry, "GuardianCannotBeAttestor");
+    });
+
+    it("refuses to bind a wallet if the guardian equals the wallet itself", async function () {
+      const freshCust = ethers.keccak256(ethers.toUtf8Bytes("FRESHCUST888"));
+      await expect(
+        registry.connect(attestor).bindWallet(freshCust, attacker.address, attacker.address)
+      ).to.be.revertedWithCustomError(registry, "GuardianCannotBeWallet");
+    });
+
+    it("refuses to silently overwrite the guardian on a second bindWallet for the same identity", async function () {
+      // alice/aliceNew already bound to ALICE_ID with guardianAlice in beforeEach
+      await expect(
+        registry.connect(attestor).bindWallet(ALICE_ID, aliceOther.address, guardianBob.address)
+      ).to.be.revertedWithCustomError(registry, "GuardianMismatch").withArgs(guardianAlice.address, guardianBob.address);
     });
   });
 
@@ -582,6 +597,32 @@ describe("Rebind", function () {
       // even while Alice's claim is still active.
       await expect(queue.openClaim(BOB_ID, bob.address, aliceOther.address, deadline, sigBob, gSigBob))
         .to.emit(queue, "ClaimOpened");
+    });
+
+    it("an attestor-shaped signature does NOT verify as a valid guardian signature", async function () {
+      const deadline = (await time.latest()) + 3600;
+      // Sign with the ATTESTOR type struct using the guardian's key — this used
+      // to accidentally verify before the typehash split.
+      const net = await ethers.provider.getNetwork();
+      const domain = { name: "Rebind", version: "1", chainId: net.chainId, verifyingContract: await queue.getAddress() };
+      const attestorShapedTypes = {
+        RecoveryClaim: [
+          { name: "personId", type: "bytes32" },
+          { name: "oldWallet", type: "address" },
+          { name: "newWallet", type: "address" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+        ],
+      };
+      const wrongShapeGuardianSig = await guardianAlice.signTypedData(domain, attestorShapedTypes, {
+        personId: ALICE_ID, oldWallet: alice.address, newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+      const sig = await attest(queue, attestor, {
+        personId: ALICE_ID, oldWallet: alice.address, newWallet: aliceNew.address, nonce: 0, deadline,
+      });
+
+      await expect(queue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, wrongShapeGuardianSig))
+        .to.be.revertedWithCustomError(queue, "BadGuardianAttestation");
     });
   });
 

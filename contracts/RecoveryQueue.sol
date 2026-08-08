@@ -68,6 +68,10 @@ contract RecoveryQueue is EIP712, AccessControl {
     bytes32 private constant CLAIM_TYPEHASH = keccak256(
         "RecoveryClaim(bytes32 personId,address oldWallet,address newWallet,uint256 nonce,uint256 deadline)"
     );
+    
+    bytes32 private constant GUARDIAN_CLAIM_TYPEHASH = keccak256(
+        "GuardianRecoveryClaim(bytes32 personId,address oldWallet,address newWallet,uint256 nonce,uint256 deadline)"
+    );
 
     BindingRegistry public immutable registry;
 
@@ -221,15 +225,22 @@ contract RecoveryQueue is EIP712, AccessControl {
         // Recovering into a dead wallet would be pointless and unsafe.
         if (!registry.isActive(newWallet)) revert NewWalletNotActive(newWallet);
 
-        bytes32 structHash = keccak256(
-            abi.encode(CLAIM_TYPEHASH, personId, oldWallet, newWallet, nonces[newWallet]++, deadline)
-        );
-        bytes32 digest = _hashTypedDataV4(structHash);
-        address recovered = digest.recover(signature);
-        if (recovered != attestor) revert BadAttestation(recovered);
+        uint256 nonce = nonces[newWallet]++;
 
-        recovered = digest.recover(guardianSignature);
-        if (recovered != registry.guardianOf(personId)) revert BadGuardianAttestation(recovered);
+        bytes32 attestorStructHash = keccak256(
+            abi.encode(CLAIM_TYPEHASH, personId, oldWallet, newWallet, nonce, deadline)
+        );
+
+        bytes32 attestorDigest = _hashTypedDataV4(attestorStructHash);
+        address recoveredAttestor = attestorDigest.recover(signature);
+        if (recoveredAttestor != attestor) revert BadAttestation(recoveredAttestor);
+
+        bytes32 guardianStructHash = keccak256(
+            abi.encode(GUARDIAN_CLAIM_TYPEHASH, personId, oldWallet, newWallet, nonce, deadline)
+        );
+        bytes32 guardianDigest = _hashTypedDataV4(guardianStructHash);
+        address recoveredGuardian = guardianDigest.recover(guardianSignature);
+        if (recoveredGuardian != registry.guardianOf(personId)) revert BadGuardianAttestation(recoveredGuardian);
 
         uint64 execAt = uint64(block.timestamp) + cureWindow;
         _claims.push(

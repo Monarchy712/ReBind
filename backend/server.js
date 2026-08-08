@@ -56,6 +56,17 @@ let attestor;
     queueAddress: D.queue,
     chainId: Number(net.chainId),
   });
+
+  if (process.env.GUARDIAN_PK) {
+    const guardianAddr = new ethers.Wallet(normalizePrivateKey(process.env.GUARDIAN_PK)).address;
+    if (guardianAddr.toLowerCase() === attestorWallet.address.toLowerCase()) {
+      throw new Error("FATAL: GUARDIAN_PK resolves to the same address as ATTESTOR_PK. These must be independent keys.");
+    }
+    console.log(`  guardian ${guardianAddr}`);
+  } else {
+    console.warn("  WARNING: GUARDIAN_PK not set. /api/claim will require guardianSignature in the request body.");
+  }
+
   console.log(`Rebind backend`);
   console.log(`  mode     ${LOCAL_MODE ? "LOCAL (in-memory Cleanverse stub)" : "live (Cleanverse API)"}`);
   console.log(`  chain    ${net.chainId} @ ${RPC_URL}`);
@@ -99,8 +110,14 @@ const fail = (res, e) => {
 app.post("/api/register", async (req, res) => {
   try {
     const { customerId, address, override, guardianAddress } = req.body;
-    if (!guardianAddress || !ethers.isAddress(guardianAddress) || guardianAddress === ethers.ZeroAddress) {
+        if (!guardianAddress || !ethers.isAddress(guardianAddress) || guardianAddress === ethers.ZeroAddress) {
       throw new Error("guardianAddress is required and must be a valid non-zero address");
+    }
+    if (guardianAddress.toLowerCase() === address.toLowerCase()) {
+      throw new Error("guardianAddress cannot be the same as the wallet being registered");
+    }
+    if (guardianAddress.toLowerCase() === attestorWallet.address.toLowerCase()) {
+      throw new Error("guardianAddress cannot be the attestor's address");
     }
     const identityCommitment = personIdOf(customerId);
 
@@ -226,7 +243,7 @@ app.post("/api/claim", async (req, res) => {
 app.post("/api/guardian-sign", async (req, res) => {
   try {
     const { customerId, oldWallet, newWallet, nonce, deadline, guardianPrivateKey } = req.body;
-    const privKey = guardianPrivateKey || process.env.GUARDIAN_PK || process.env.ATTESTOR_PK;
+    const privKey = guardianPrivateKey || process.env.GUARDIAN_PK;
     if (!privKey) throw new Error("guardianPrivateKey is required to co-sign");
     const gSig = await attestor.signGuardianClaim({
       privateKey: privKey,
