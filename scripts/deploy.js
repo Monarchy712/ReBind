@@ -25,6 +25,11 @@ const assertAddress = (name, value) => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Shared with fund-local.js and the backend: the demo wallets (including the
+// replacement-guardian candidate) are derived from the Hardhat node's own
+// mnemonic, which makes them pre-funded and disposable.
+const HARDHAT_MNEMONIC = "test test test test test test test test test test test junk";
+
 /**
  * Waits until an address actually reads back as a contract.
  *
@@ -347,6 +352,51 @@ async function main() {
 
   const isLocal = Number(net.chainId) === 31337;
 
+  // A fresh wallet the demo nominates as the REPLACEMENT guardian. The
+  // guardian-replacement form autofills this address, and the demo's register
+  // beat binds it to the demo customerId so it is a verified wallet. Local
+  // mode derives it from the Hardhat mnemonic (pre-funded, key known); live
+  // mode uses DEMO_NEW_GUARDIAN_PK when set (so the backend holds the key and
+  // claims can co-sign as it after a replacement), otherwise generates a
+  // disposable address. Set DEMO_NEW_GUARDIAN_ADDRESS to pin a specific one.
+  let newGuardianAddr;
+  let newGuardianKeyed = false; // the backend holds this guardian's key and can co-sign as it
+  if (process.env.DEMO_NEW_GUARDIAN_ADDRESS) {
+    newGuardianAddr = address(process.env.DEMO_NEW_GUARDIAN_ADDRESS);
+    assertAddress("DEMO_NEW_GUARDIAN_ADDRESS", newGuardianAddr);
+    if (process.env.DEMO_NEW_GUARDIAN_PK) {
+      const pkAddr = new ethers.Wallet(process.env.DEMO_NEW_GUARDIAN_PK).address;
+      if (pkAddr.toLowerCase() !== newGuardianAddr.toLowerCase()) {
+        throw new Error(
+          `DEMO_NEW_GUARDIAN_ADDRESS (${newGuardianAddr}) does not match DEMO_NEW_GUARDIAN_PK (${pkAddr}). ` +
+          `Pin the address of the key the backend will hold.`
+        );
+      }
+      newGuardianKeyed = true;
+    }
+  } else if (process.env.DEMO_NEW_GUARDIAN_PK) {
+    newGuardianAddr = new ethers.Wallet(process.env.DEMO_NEW_GUARDIAN_PK).address;
+    newGuardianKeyed = true;
+  } else if (isLocal) {
+    newGuardianAddr = ethers.HDNodeWallet.fromPhrase(
+      HARDHAT_MNEMONIC,
+      undefined,
+      "m/44'/60'/0'/0/9",
+    ).address;
+    // The backend derives the same wallet from the Hardhat mnemonic, so it can
+    // co-sign as this guardian after a replacement.
+    newGuardianKeyed = true;
+  } else {
+    newGuardianAddr = ethers.Wallet.createRandom().address;
+  }
+  console.log(
+    `  newGuardian  ${newGuardianAddr} (replacement guardian candidate${
+      newGuardianKeyed
+        ? " — key held by the backend, claims can co-sign as it"
+        : " — address only, no key held"
+    })`,
+  );
+
   const out = {
     network: net.name,
     chainId: Number(net.chainId),
@@ -367,6 +417,7 @@ async function main() {
     // this deployment was written against lets it refuse to serve a
     // deployments.json belonging to a different chain.
     local: isLocal,
+    newGuardian: newGuardianAddr,
     deployedAt: new Date().toISOString(),
   };
 

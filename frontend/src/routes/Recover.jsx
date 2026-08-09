@@ -3,7 +3,7 @@
    tracks it. Every step says what it will do to the chain before it does it.
    ====================================================================== */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, safe } from "../lib/api.js";
 import { humanWindow, short, shortTx } from "../lib/format.js";
@@ -49,13 +49,25 @@ export default function Recover() {
     newGuardian: "",
   });
 
+  /* The new guardian MUST differ from the live one — the contract reverts with
+     SameGuardian otherwise. deploy.js generates a dedicated candidate wallet
+     (S.wallets.G2) and the register beat binds it to this customerId, so the
+     form autofills that verified address. Never clobber an address the user
+     has typed. */
+  const suggestedNewGuardian = useMemo(() => {
+    const live = S.liveGuardian ? S.liveGuardian.toLowerCase() : null;
+    const g2 = S.wallets.G2;
+    if (g2 && g2.toLowerCase() !== live) return g2;
+    return "";
+  }, [S.wallets.G2, S.liveGuardian]);
+
   useEffect(() => {
-    setGForm({
-      customerId: S.customerId || "",
-      wallet: S.wallets.A || "",
-      newGuardian: S.wallets.G || "",
-    });
-  }, [S.customerId, S.wallets.A, S.wallets.G]);
+    setGForm((f) => ({
+      customerId: S.customerId || f.customerId || "",
+      wallet: S.wallets.A || f.wallet || "",
+      newGuardian: f.newGuardian || suggestedNewGuardian,
+    }));
+  }, [S.customerId, S.wallets.A, suggestedNewGuardian]);
 
   const handleOpenGuardianRequest = async () => {
     if (
@@ -348,6 +360,20 @@ export default function Recover() {
           <div className="help">
             The new guardian will co-sign any future recovery claims for this
             identity.
+            {S.liveGuardian ? (
+              <>
+                {" "}Current guardian:{" "}
+                <code className="codelet">{short(S.liveGuardian)}</code> — the
+                new one must be a different address.
+              </>
+            ) : null}
+            {gForm.newGuardian &&
+            S.balances[gForm.newGuardian]?.active &&
+            !S.balances[gForm.newGuardian]?.revoked ? (
+              <span style={{ color: "var(--good)" }}>
+                {" "}✓ {short(gForm.newGuardian)} is a verified wallet.
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="row" style={{ gap: 10 }}>
