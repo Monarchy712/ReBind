@@ -887,4 +887,30 @@ app.get("/api/state", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`  http://localhost:${PORT}`));
+const server = app.listen(PORT, () => console.log(`  http://localhost:${PORT}`));
+
+/**
+ * Say why the port could not be taken, and exit non-zero.
+ *
+ * Without this the failure was silent and deeply confusing: the listen error
+ * went unhandled, the listening handle was released, the event loop drained,
+ * and Node exited with status 0 — after the startup banner had already printed.
+ * The server appeared to boot and then "just shut off", while a stale process
+ * from an earlier session kept answering on the same port with whatever code it
+ * had been started with.
+ */
+server.on("error", (e) => {
+  if (e.code === "EADDRINUSE") {
+    console.error(
+      `\nRebind backend cannot start:\n\n` +
+      `Port ${PORT} is already in use — most likely an older copy of this server ` +
+      `that is still running and still serving its own build.\n\n` +
+      `  Find it:  lsof -i :${PORT}      (or: ss -ltnp | grep :${PORT})\n` +
+      `  Stop it:  kill <pid>\n` +
+      `  Or run on another port:  PORT=3001 npm run server\n`
+    );
+  } else {
+    console.error(`\nRebind backend cannot start:\n\n${e.message}\n`);
+  }
+  process.exit(1);
+});
