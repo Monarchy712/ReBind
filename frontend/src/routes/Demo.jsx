@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, safe } from "../lib/api.js";
-import { humanWindow, num, shortTx, units } from "../lib/format.js";
+import { humanWindow, num, short, shortTx, units } from "../lib/format.js";
 import { flyValue, once, REDUCED } from "../lib/motion.js";
 import {
   ActionButton,
@@ -247,6 +247,23 @@ export default function Demo() {
             "ok",
           );
 
+          if (S.wallets.G2) {
+            const r2g = await api.register({
+              customerId: S.customerId,
+              address: S.wallets.G2,
+              override: true,
+              guardianAddress,
+            });
+            log(
+              `replacement guardian wallet G2 bound to the SAME customerId${
+                r2g.cleanverse?.cvRecordId
+                  ? ` · record ${r2g.cleanverse.cvRecordId}`
+                  : ""
+              }`,
+              "ok",
+            );
+          }
+
           const r3 = await api.mint(S.wallets.A, 250);
           log(`minted 250 NOTE to wallet A · ${shortTx(r3.txHash)}`, "ok");
           once(cardA, "flash-good", 850);
@@ -283,6 +300,23 @@ export default function Demo() {
           );
           S.goTo("claim");
         } else if (action === "claim" || action === "reopen") {
+          /* After a guardian replacement the registry's guardian is the NEW
+             guardian; a claim co-signed by the old key reverts with
+             BadGuardianAttestation. Fail fast with the fix, not a raw revert. */
+          const live = S.liveGuardian;
+          const coSign = S.guardian.keys || [];
+          if (
+            live &&
+            live !== "0x0000000000000000000000000000000000000000" &&
+            !coSign.some((k) => k.toLowerCase() === live.toLowerCase())
+          ) {
+            throw new Error(
+              `The live guardian is ${live}, but this backend can only co-sign as ${coSign.join(", ")}. ` +
+              `A claim needs the CURRENT guardian's signature — after a replacement the old key is ` +
+              `obsolete. Set DEMO_NEW_GUARDIAN_PK to the new guardian's key (local mode already knows ` +
+              `it) and redeploy, or rotate the guardian back to a key the backend holds.`,
+            );
+          }
           log(
             action === "claim"
               ? "proving identity equivalence via query_apass_list…"
@@ -507,6 +541,19 @@ export default function Demo() {
             signatures or reverts. The moment the claim opens,{" "}
             <strong>wallet A freezes</strong>.
           </p>
+          {S.liveGuardian &&
+          S.liveGuardian !== "0x0000000000000000000000000000000000000000" &&
+          !(S.guardian.keys || []).some(
+            (k) => k.toLowerCase() === S.liveGuardian.toLowerCase(),
+          ) ? (
+            <div className="hint">
+              The live guardian ({" "}<code className="codelet">{short(S.liveGuardian)}</code>) is not a
+              key this backend can co-sign as. Recovery needs the CURRENT
+              guardian&apos;s signature — set{" "}
+              <code className="codelet">DEMO_NEW_GUARDIAN_PK</code> and redeploy,
+              or rotate the guardian back to a key the backend holds.
+            </div>
+          ) : null}
           <div>
             <ActionButton className="btn primary" onAction={() => run("claim")}>
               Prove identity and open a claim

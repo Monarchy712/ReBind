@@ -139,8 +139,8 @@ export function RebindProvider({ children }) {
   );
 
   const walletList = useCallback(
-    () => [wallets.A, wallets.B, wallets.X].filter(Boolean),
-    [wallets.A, wallets.B, wallets.X],
+    () => [wallets.A, wallets.B, wallets.X, wallets.G2].filter(Boolean),
+    [wallets.A, wallets.B, wallets.X, wallets.G2],
   );
 
   /* ------------------------------------------------------------- reads */

@@ -298,12 +298,31 @@ app.post("/api/claim", async (req, res) => {
       // Deliberately no ATTESTOR_PK fallback: signing the guardian's half with
       // the attestor's key would make the co-signature a formality and the
       // "four independent layers" claim untrue.
-      const gKey = (guardianPrivateKey && normalizePrivateKey(guardianPrivateKey)) || guardianKey();
+      //
+      // The co-signature must come from the CURRENT guardianOf. After a guardian
+      // replacement the old key is obsolete and openClaim reverts with
+      // BadGuardianAttestation — so co-sign with whichever held key matches the
+      // live guardian (GUARDIAN_PK, DEMO_NEW_GUARDIAN_PK, or a local demo
+      // wallet), and fail with a fix instead of a raw revert when there is none.
+      let gKey = guardianPrivateKey ? normalizePrivateKey(guardianPrivateKey) : null;
       if (!gKey) {
-        throw new Error(
-          "No guardian key. Opening a claim needs the nominated guardian's co-signature — " +
-          "pass guardianSignature, or set GUARDIAN_PK. It must NOT be the attestor key."
-        );
+        const liveGuardian = await registry.guardianOf(att.personId);
+        const match = guardianKeyFor(liveGuardian);
+        if (!match) {
+          if (liveGuardian === ethers.ZeroAddress) {
+            throw new Error(
+              "No guardian is pinned for this identity. It was never registered, or the customerId is wrong."
+            );
+          }
+          const held = guardianKeys().map((k) => k.address).join(", ") || "(none held)";
+          throw new Error(
+            `The live guardian is ${liveGuardian}, but this backend can only co-sign as ${held}. ` +
+            `A claim must be co-signed by the CURRENT guardian — after a replacement the old key is ` +
+            `obsolete. Set DEMO_NEW_GUARDIAN_PK to the replacement guardian's key and redeploy ` +
+            `(local mode already knows it), or rotate the guardian back to a key this backend holds.`
+          );
+        }
+        gKey = match.privateKey;
       }
       const gRes = await attestor.signGuardianClaim({
         privateKey: gKey,
@@ -356,8 +375,19 @@ app.post("/api/guardian-sign", async (req, res) => {
     const { customerId, oldWallet, newWallet, nonce, deadline, guardianPrivateKey } = req.body;
     // Same rule as /api/claim: the guardian's half is never signed with the
     // attestor key, so there is no ATTESTOR_PK fallback here either.
-    const privKey = (guardianPrivateKey && normalizePrivateKey(guardianPrivateKey)) || guardianKey();
-    if (!privKey) throw new Error("guardianPrivateKey is required to co-sign");
+    let privKey = guardianPrivateKey ? normalizePrivateKey(guardianPrivateKey) : null;
+    if (!privKey) {
+      const liveGuardian = await registry.guardianOf(personIdOf(customerId));
+      const match = guardianKeyFor(liveGuardian);
+      if (!match) {
+        const held = guardianKeys().map((k) => k.address).join(", ") || "(none held)";
+        throw new Error(
+          `This backend can only co-sign as ${held}, but the live guardian is ${liveGuardian}. ` +
+          `Pass guardianPrivateKey for the CURRENT guardian, or set DEMO_NEW_GUARDIAN_PK and redeploy.`
+        );
+      }
+      privKey = match.privateKey;
+    }
     const gSig = await attestor.signGuardianClaim({
       privateKey: privKey,
       customerId,
@@ -584,7 +614,7 @@ const demoAccount = (i) =>
   ethers.HDNodeWallet.fromPhrase(HARDHAT_MNEMONIC, undefined, `m/44'/60'/0'/0/${i}`);
 
 const localDemoWallets = LOCAL_MODE
-  ? { A: demoAccount(5), B: demoAccount(6), X: demoAccount(7), G: demoAccount(8) }
+  ? { A: demoAccount(5), B: demoAccount(6), X: demoAccount(7), G: demoAccount(8), G2: demoAccount(9) }
   : null;
 
 /**
@@ -603,15 +633,101 @@ const guardianSignerAddress = (() => {
   try { return new ethers.Wallet(k).address; } catch { return null; }
 })();
 
-const DEMO_WALLETS = {
-  A: process.env.DEMO_WALLET_A || localDemoWallets?.A.address || "0xa34118bD1A2A789A962A4471C59c3964fb716123",
-  B: process.env.DEMO_WALLET_B || localDemoWallets?.B.address || "0x7A0A94615094Ef0673f2D0F031D43fB9ED78cc0B",
-  X: process.env.DEMO_WALLET_X || localDemoWallets?.X.address || "0x6d11172f538b60BE3a69c745944767Ac94019df7",
-  // An explicit DEMO_WALLET_G still wins — that operator is nominating a
-  // guardian they will supply signatures for out of band, and canCoSign below
-  // reports honestly when we cannot sign for it.
-  G: process.env.DEMO_WALLET_G || guardianSignerAddress || localDemoWallets?.G.address || null,
-};
+const DEMO_WALLETS = (() => {
+  // Local mode derives the wallets from the Hardhat mnemonic, so they are
+  // pre-funded, disposable, and can never collide with anything else on the
+  // fresh chain the deploy script writes to.
+  if (LOCAL_MODE) {
+    return {
+      A: localDemoWallets.A.address,
+      B: localDemoWallets.B.address,
+      X: localDemoWallets.X.address,
+      // An explicit DEMO_WALLET_G still wins — that operator is nominating a
+      // guardian they will supply signatures for out of band, and canCoSign
+      // below reports honestly when we cannot sign for it.
+      G: process.env.DEMO_WALLET_G || localDemoWallets.G.address,
+      // Replacement-guardian candidate generated at deploy time and bound to
+      // the demo customerId by the register beat, so the guardian-replacement
+      // form can autofill a verified, non-colliding address.
+      G2: D.newGuardian || localDemoWallets.G2.address,
+    };
+  }
+
+  // Live mode: the demo wallets USED to fall back to hardcoded addresses, one
+  // of which was the issuer's own address. deploy.js binds the fallback
+  // receiver (the issuer by default) as an institutional wallet, so registering
+  // that address as Alice immediately failed on-chain with "already bound to a
+  // different customer identity" — on every fresh deployment. Require explicit,
+  // never-before-bound addresses instead of guessing one.
+  const missing = ["DEMO_WALLET_A", "DEMO_WALLET_B", "DEMO_WALLET_X"].filter((k) => !process.env[k]);
+  if (missing.length) {
+    throw new Error(
+      `Live mode needs fresh demo wallets: set ${missing.join(", ")} in .env. ` +
+      `They must be addresses the registry has never bound — in particular NOT the issuer ` +
+      `(${issuer.address}) or the attestor (${attestorWallet.address}), which the deploy ` +
+      `script binds as institutions.`
+    );
+  }
+
+  const wallets = {
+    A: process.env.DEMO_WALLET_A,
+    B: process.env.DEMO_WALLET_B,
+    X: process.env.DEMO_WALLET_X,
+    G: process.env.DEMO_WALLET_G || guardianSignerAddress || null,
+    // Replacement-guardian candidate generated at deploy time (see deploy.js).
+    // Null until a deployment that wrote newGuardian is used.
+    G2: D.newGuardian || null,
+  };
+
+  // The deploy script binds the issuer (fallback receiver) and the vault as
+  // institutional wallets. A demo wallet that IS one of those can never be
+  // registered as a person — the registry rejects it as "already bound".
+  // D.issuer is the address the CURRENT deployment actually bound, which can
+  // differ from issuer.address if DEPLOYER_PK changed after deploying.
+  const taken = [
+    ["issuer (DEPLOYER_PK)", issuer.address],
+    ...(D.issuer ? [["issuer (deployment)", D.issuer]] : []),
+    ["attestor", attestorWallet.address],
+    ...(D.vault ? [["vault", D.vault]] : []),
+  ];
+  for (const [name, addr] of taken) {
+    for (const [w, demoAddr] of Object.entries(wallets)) {
+      if (demoAddr && demoAddr.toLowerCase() === addr.toLowerCase()) {
+        throw new Error(
+          `DEMO_WALLET_${w} (${demoAddr}) is the on-chain ${name}, which the deploy script binds ` +
+          `as an institution. Use a fresh address, or set FALLBACK_RECEIVER in .env to a dedicated ` +
+          `address so the issuer is not bound.`
+        );
+      }
+    }
+  }
+
+  // If a borrower key is configured for the bridge advance, it MUST belong to
+  // wallet B — the vault only accepts a draw signed by the claim's own new
+  // wallet. A mismatch makes the draw revert with BadAuthorization.
+  if (process.env.DEMO_BORROWER_PK) {
+    const borrowerAddr = new ethers.Wallet(normalizePrivateKey(process.env.DEMO_BORROWER_PK)).address;
+    if (borrowerAddr.toLowerCase() !== wallets.B.toLowerCase()) {
+      throw new Error(
+        `DEMO_BORROWER_PK (${borrowerAddr}) does not match DEMO_WALLET_B (${wallets.B}). ` +
+        `The advance can only be drawn by the claim's new wallet, so the borrower key must BE wallet B.`
+      );
+    }
+  }
+
+  // If both DEMO_WALLET_G and GUARDIAN_PK are set they must agree, or the
+  // registered guardian and the co-signing key diverge and every claim reverts
+  // with BadGuardianAttestation.
+  if (wallets.G && guardianSignerAddress && wallets.G.toLowerCase() !== guardianSignerAddress.toLowerCase()) {
+    throw new Error(
+      `DEMO_WALLET_G (${wallets.G}) does not match GUARDIAN_PK (${guardianSignerAddress}). ` +
+      `Registration pins DEMO_WALLET_G as the guardian, but claims are co-signed with GUARDIAN_PK — ` +
+      `the two must be the same address.`
+    );
+  }
+
+  return wallets;
+})();
 
 /**
  * The guardian's signing key.
@@ -627,6 +743,45 @@ function guardianKey() {
   if (process.env.GUARDIAN_PK) return normalizePrivateKey(process.env.GUARDIAN_PK);
   if (localDemoWallets) return localDemoWallets.G.privateKey;
   return null;
+}
+
+/**
+ * Every demo guardian key this backend can co-sign with. The claim flow picks
+ * whichever one matches the CURRENT live guardian, so a guardian replacement
+ * keeps the demo working instead of reverting with BadGuardianAttestation.
+ * Local mode derives both the original (G) and the replacement candidate (G2)
+ * from the Hardhat mnemonic; live mode takes them from GUARDIAN_PK and
+ * DEMO_NEW_GUARDIAN_PK.
+ */
+function guardianKeys() {
+  const keys = [];
+  const push = (pk, label) => {
+    if (!pk) return;
+    const privateKey = normalizePrivateKey(pk);
+    keys.push({ label, privateKey, address: new ethers.Wallet(privateKey).address });
+  };
+  push(process.env.GUARDIAN_PK, "GUARDIAN_PK");
+  push(process.env.DEMO_NEW_GUARDIAN_PK, "DEMO_NEW_GUARDIAN_PK");
+  if (localDemoWallets) {
+    keys.push({
+      label: "local wallet G",
+      privateKey: localDemoWallets.G.privateKey,
+      address: localDemoWallets.G.address,
+    });
+    keys.push({
+      label: "local wallet G2",
+      privateKey: localDemoWallets.G2.privateKey,
+      address: localDemoWallets.G2.address,
+    });
+  }
+  return keys;
+}
+
+/** The held key whose address is the given live guardian, or null. */
+function guardianKeyFor(liveGuardian) {
+  if (!liveGuardian) return null;
+  const want = liveGuardian.toLowerCase();
+  return guardianKeys().find((k) => k.address.toLowerCase() === want) || null;
 }
 
 /** The signer that can draw an advance, or null if we hold no borrower key. */
@@ -826,6 +981,9 @@ app.get("/api/config", (_req, res) => {
       canCoSign: guardianSignerAddress !== null
         && DEMO_WALLETS.G != null
         && DEMO_WALLETS.G.toLowerCase() === guardianSignerAddress.toLowerCase(),
+      // Every address this backend can actually co-sign as. After a guardian
+      // replacement the claim flow uses whichever matches the CURRENT guardian.
+      keys: guardianKeys().map((k) => k.address),
     },
     advance: vault
       ? {
