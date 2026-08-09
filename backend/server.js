@@ -181,10 +181,29 @@ function decodeRevert(e) {
   return null;
 }
 
+/**
+ * Public RPC endpoints fail in ways ethers cannot describe usefully. A rate
+ * limit or a transient node error arrives as a non-standard JSON-RPC shape and
+ * surfaces as "could not coalesce error", which reached the trace log verbatim
+ * during a Base Sepolia run and tells the reader nothing — least of all that
+ * the transaction may well have landed.
+ */
+function humaniseRpcError(e) {
+  const raw = e?.shortMessage || e?.message || String(e);
+  if (/could not coalesce error/i.test(raw) || e?.code === "UNKNOWN_ERROR") {
+    return "The RPC endpoint returned an error it could not describe — usually rate limiting on a public node. " +
+           "The transaction may still have been mined; re-read the claim before retrying.";
+  }
+  if (/timeout|ETIMEDOUT|ECONNRESET|socket hang up/i.test(raw)) {
+    return "The RPC endpoint timed out. The transaction may still have been mined; re-read the claim before retrying.";
+  }
+  return raw;
+}
+
 const fail = (res, e) => {
   console.error(e);
   const decoded = decodeRevert(e);
-  res.status(400).json({ ok: false, error: decoded || e.shortMessage || e.message, proof: e.proof });
+  res.status(400).json({ ok: false, error: decoded || humaniseRpcError(e), proof: e.proof });
 };
 
 // ---- 1. register a person + wallet -----------------------------------------
@@ -978,9 +997,12 @@ app.get("/api/config", (_req, res) => {
     // is what let a mismatched pair reach the claim step and revert on-chain.
     guardian: {
       address: DEMO_WALLETS.G,
-      canCoSign: guardianSignerAddress !== null
-        && DEMO_WALLETS.G != null
-        && DEMO_WALLETS.G.toLowerCase() === guardianSignerAddress.toLowerCase(),
+      // True when we hold a key for the guardian we advertise. Checked against
+      // the whole keyring, not just guardianKey(): local mode nominates its own
+      // generated wallet G while guardianKey() prefers GUARDIAN_PK, so a
+      // single-key comparison reported "signature required" for a guardian the
+      // backend could in fact sign for.
+      canCoSign: DEMO_WALLETS.G != null && guardianKeyFor(DEMO_WALLETS.G) !== null,
       // Every address this backend can actually co-sign as. After a guardian
       // replacement the claim flow uses whichever matches the CURRENT guardian.
       keys: guardianKeys().map((k) => k.address),
@@ -992,6 +1014,12 @@ app.get("/api/config", (_req, res) => {
           ltvBps: D.advanceLtvBps,
           feeBps: D.advanceFeeBps,
           stableSymbol: "dUSDC",
+          // Whether this backend can sign as the borrower. Only wallet B can
+          // authorise an advance against its own claim, and off a local chain
+          // we hold that key only if DEMO_BORROWER_PK is set. Saying so here
+          // lets the UI explain the gap instead of offering a button whose
+          // only possible outcome is "No borrower key available".
+          canDraw: borrowerSigner() !== null,
         }
       : { enabled: false },
   });

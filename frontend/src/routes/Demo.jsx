@@ -154,6 +154,26 @@ export default function Demo() {
     };
   }, [timed, S.claimId, S.rejected, S.cureWindow, log, toast]);
 
+  /* Keep the advance quote fresh while the bridge beat is on screen.
+     It used to be read exactly once, immediately after the commit transaction
+     resolved. Public RPCs load-balance across replicas, so that read can land
+     on a node one block behind, where the claim is not yet committed and
+     quote() answers zero — the button then offered "Draw 0.0 dUSDC" against a
+     claim actually worth 200. The approve step already retries for this same
+     reason. Re-reading until the advance is drawn heals the stale answer and
+     costs one cheap call every few seconds. */
+  const drawn = !!S.adv?.advance?.drawn;
+  const refreshAdvRef = useRef(S.refreshAdvance);
+  useEffect(() => { refreshAdvRef.current = S.refreshAdvance; });
+  useEffect(() => {
+    if (S.beatId !== "advance" || S.claimId === null || drawn) return undefined;
+    let alive = true;
+    const pull = () => { if (alive) refreshAdvRef.current(S.claimId); };
+    pull();
+    const t = setInterval(pull, 4000);
+    return () => { alive = false; clearInterval(t); };
+  }, [S.beatId, S.claimId, drawn]);
+
   /* The Execute button's enabled state is derived, not imperatively toggled.
      In the vanilla build a re-render rebuilt it disabled and a one-shot flag
      stopped it ever re-enabling; here it simply cannot drift from the data. */
@@ -410,9 +430,23 @@ export default function Demo() {
             kind: "warn",
           });
         } else if (action === "approve") {
-          log("issuer countersigns the claim…", "info");
-          await api.approve(S.claimId);
-          log("issuer approval recorded.", "ok");
+          /* Approve and execute are one button but two transactions, so a
+             transient RPC failure between them used to strand the claim:
+             approved on-chain, unexecuted, and re-clicking tried to approve a
+             second time. Read current state first and sign only what is still
+             outstanding — that makes this button safe to retry, which on a
+             public endpoint it will need to be. */
+          const pre = await safe.claim(S.claimId);
+          if (pre?.claim?.issuerApproved) {
+            log(
+              "claim is already approved on-chain — continuing to execution.",
+              "dim",
+            );
+          } else {
+            log("issuer countersigns the claim…", "info");
+            await api.approve(S.claimId);
+            log("issuer approval recorded.", "ok");
+          }
 
           /* Public RPCs lag on read-after-write: the approve tx is mined but a
            follow-up read may hit a node one block behind. Wait until the chain
@@ -688,15 +722,35 @@ export default function Demo() {
                 </div>
               ) : (
                 <>
+                  {/* Two reasons this button may not be offerable. A zero
+                      quote means the vault's view has not caught up yet, and
+                      clicking would send a transaction that can only revert.
+                      No borrower key means the backend cannot sign as wallet B
+                      at all. Say which, rather than failing on click. */}
                   <ActionButton
                     className="btn primary"
+                    disabled={
+                      !S.advance.canDraw || !(Number(q?.principalStable) > 0)
+                    }
                     onAction={() => run("drawAdvance")}
                   >
-                    Draw {q?.principalStable ?? ""} {sym}
+                    {!S.advance.canDraw
+                      ? "Advance unavailable"
+                      : Number(q?.principalStable) > 0
+                        ? `Draw ${q.principalStable} ${sym}`
+                        : "Reading the vault quote…"}
                   </ActionButton>
                   <div className="hint">
-                    Signed by wallet B and relayed — the borrower never needs
-                    gas.
+                    {S.advance.canDraw ? (
+                      "Signed by wallet B and relayed — the borrower never needs gas."
+                    ) : (
+                      <>
+                        Only wallet B can authorise an advance against its own
+                        claim, and this backend does not hold its key. Set{" "}
+                        <code className="codelet">DEMO_BORROWER_PK</code>, or run
+                        the local demo. The recovery itself is unaffected.
+                      </>
+                    )}
                   </div>
                 </>
               )}

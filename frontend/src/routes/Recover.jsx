@@ -69,6 +69,16 @@ export default function Recover() {
     }));
   }, [S.customerId, S.wallets.A, suggestedNewGuardian]);
 
+  /* The backend can only co-sign a claim as a guardian whose private key it
+     holds. Installing any other address is a one-way door: the replacement
+     succeeds on-chain, and every future claim then fails with "the live
+     guardian is X but this backend can only co-sign as Y". So the addresses we
+     can sign for are surfaced, and anything else is refused here rather than
+     discovered later. */
+  const signable = (S.guardian?.keys || []).map((a) => a.toLowerCase());
+  const typedNew = gForm.newGuardian.trim().toLowerCase();
+  const newIsSignable = signable.length === 0 || signable.includes(typedNew);
+
   const handleOpenGuardianRequest = async () => {
     if (
       !gForm.customerId.trim() ||
@@ -100,6 +110,13 @@ export default function Recover() {
       ) {
         throw new Error(
           "New guardian must be different from the old guardian.",
+        );
+      }
+      if (!newIsSignable) {
+        throw new Error(
+          `This backend holds no key for ${gForm.newGuardian.trim()}, so it could ` +
+            `never co-sign a recovery claim for it — every future claim would fail. ` +
+            `Use one of: ${(S.guardian?.keys || []).join(", ")}.`,
         );
       }
 
@@ -367,11 +384,16 @@ export default function Recover() {
                 new one must be a different address.
               </>
             ) : null}
-            {gForm.newGuardian &&
-            S.balances[gForm.newGuardian]?.active &&
-            !S.balances[gForm.newGuardian]?.revoked ? (
+            {gForm.newGuardian && !newIsSignable ? (
+              <span style={{ color: "var(--danger)" }}>
+                {" "}This backend holds no key for {short(gForm.newGuardian)}. It
+                could never co-sign a claim for it, so recovery would break.
+                Signable: {(S.guardian?.keys || []).map(short).join(", ")}.
+              </span>
+            ) : gForm.newGuardian && newIsSignable ? (
               <span style={{ color: "var(--good)" }}>
-                {" "}✓ {short(gForm.newGuardian)} is a verified wallet.
+                {" "}✓ {short(gForm.newGuardian)} — this backend can co-sign as
+                this guardian.
               </span>
             ) : null}
           </div>
