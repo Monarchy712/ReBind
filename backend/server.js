@@ -11,6 +11,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 const { ethers } = require("ethers");
 
 const cv = require("./cleanverse-client");
@@ -23,7 +24,12 @@ const D = require("../deployments.json"); // written by scripts/deploy.js
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "..", "frontend")));
+const WEB_DIST = path.join(__dirname, "..", "frontend", "dist");
+if (fs.existsSync(path.join(WEB_DIST, "index.html"))) {
+  app.use(express.static(WEB_DIST));
+} else {
+  app.use(express.static(path.join(__dirname, "..", "frontend")));
+}
 
 // In local mode the contracts live on the Hardhat node, not on RPC_URL — which
 // still holds the testnet endpoint so switching modes needs no .env edit.
@@ -659,6 +665,86 @@ app.get("/api/guardian-replace/state/:requestId", async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// ---- 5b. vault fallback receiver endpoints ----------------------------------
+app.get("/api/vault/fallback-receiver", async (req, res) => {
+  if (!vault) return res.status(404).json({ ok: false, error: "No vault deployed." });
+  try {
+    const address = await vault.fallbackReceiver();
+    const active = await registry.isActive(address);
+    ok(res, { address, active });
+  } catch (e) { fail(res, e); }
+});
+
+app.post("/api/vault/fallback-receiver", async (req, res) => {
+  if (!vault) return res.status(404).json({ ok: false, error: "No vault deployed." });
+  try {
+    const { address } = req.body;
+    if (!ethers.isAddress(address) || address === ethers.ZeroAddress) {
+      throw new Error("Invalid receiver address");
+    }
+    const tx = await vault.setFallbackReceiver(address);
+    await tx.wait();
+    ok(res, { txHash: tx.hash });
+  } catch (e) { fail(res, e); }
+});
+
+app.get("/api/vault/repayment-failures", async (req, res) => {
+  if (!vault) return res.status(404).json({ ok: false, error: "No vault deployed." });
+  try {
+    const filter = vault.filters.RepaymentFailed();
+    const events = await vault.queryFilter(filter, 0, "latest");
+    const list = [];
+    for (const e of events) {
+      const claimId = Number(e.args.claimId);
+      const owedNote = ethers.formatUnits(e.args.owedNote, 6);
+      const reason = e.args.reason;
+      
+      let receiver = ethers.ZeroAddress;
+      try {
+        receiver = await vault.fallbackReceiver({ blockTag: e.blockNumber });
+      } catch (err) {
+        receiver = await vault.fallbackReceiver();
+      }
+      
+      list.push({
+        claimId,
+        owedNote,
+        reason,
+        receiver,
+        txHash: e.transactionHash,
+        blockNumber: e.blockNumber,
+      });
+    }
+    ok(res, { failures: list });
+  } catch (e) { fail(res, e); }
+});
+
+// ---- 5c. list guardian replacement requests ---------------------------------
+app.get("/api/guardian-replace/requests", async (req, res) => {
+  if (!guardianQueue) return res.status(404).json({ ok: false, error: "No guardian queue deployed." });
+  try {
+    const count = Number(await guardianQueue.requestCount());
+    const list = [];
+    for (let i = 0; i < count; i++) {
+      const reqData = await guardianQueue.getRequest(i);
+      const timeRemaining = Number(await guardianQueue.timeRemaining(i));
+      list.push({
+        requestId: i,
+        personId: reqData.personId,
+        wallet: reqData.wallet,
+        oldGuardian: reqData.oldGuardian,
+        newGuardian: reqData.newGuardian,
+        openedAt: Number(reqData.openedAt),
+        executableAt: Number(reqData.executableAt),
+        cancelled: reqData.cancelled,
+        finalized: reqData.finalized,
+        timeRemaining,
+      });
+    }
+    ok(res, { requests: list });
+  } catch (e) { fail(res, e); }
+});
+
 app.get("/api/config", (_req, res) => {
   ok(res, {
     wallets: DEMO_WALLETS,
@@ -700,11 +786,33 @@ app.get("/api/state", async (req, res) => {
       };
     }
     let liveGuardian = null;
+    let activeGuardianRequest = null;
     if (customerId) {
       const personId = personIdOf(customerId);
       liveGuardian = await registry.guardianOf(personId);
+
+      if (guardianQueue) {
+        const hasActive = await guardianQueue.hasActiveRequest(personId);
+        if (hasActive) {
+          const requestId = Number(await guardianQueue.activeRequestOf(personId));
+          const reqData = await guardianQueue.getRequest(requestId);
+          const timeRemaining = Number(await guardianQueue.timeRemaining(requestId));
+          activeGuardianRequest = {
+            requestId,
+            personId: reqData.personId,
+            wallet: reqData.wallet,
+            oldGuardian: reqData.oldGuardian,
+            newGuardian: reqData.newGuardian,
+            openedAt: Number(reqData.openedAt),
+            executableAt: Number(reqData.executableAt),
+            cancelled: reqData.cancelled,
+            finalized: reqData.finalized,
+            timeRemaining,
+          };
+        }
+      }
     }
-    ok(res, { wallets: out, contracts: D, claimCount: Number(await queue.claimCount()), liveGuardian });
+    ok(res, { wallets: out, contracts: D, claimCount: Number(await queue.claimCount()), liveGuardian, activeGuardianRequest });
   } catch (e) { fail(res, e); }
 });
 

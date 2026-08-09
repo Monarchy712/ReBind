@@ -411,6 +411,29 @@ test/          133 tests. rebind.test.js covers every on-chain attack path and
 scripts/       deploy, register-atoken, freeze-scope-test, compile-local, fund-local
 backend/       cleanverse.js (API+AES), attestor.js (EIP-712), server.js
                cleanverse-local.js (offline stub), cleanverse-client.js (mode switch)
-frontend/      single-file demo UI
+frontend/      Vite + React frontend application (dist/ holds compiled production build)
 ```
-# ReBind
+
+---
+
+## Frontend React Application
+
+The frontend is a Vite + React application configured with `react-router-dom` using hash routing for seamless static page loading under `frontend/dist`.
+
+### Route Structure
+* **`/` — Overview / Landing**: Static showcase of the protocol. Operates without any blockchain/backend dependency, so it displays instantly even when offline.
+* **`/demo` — Live Demo**: A scripted walkthrough illustrating the full lifecycle: wallet registration -> blocked transfer -> compromise -> recovery claim -> issuer review -> optional bridge advance -> settlement. Includes a **"replace guardian"** shortcut that redirects to the Recover replacement form.
+* **`/recover` — Recover**: The user recovery wizard. Supports both standard claims and the **Guardian Replacement Form** (accessible via *"I've lost access to my guardian too"*).
+* **`/console` — Console**: The issuer dashboard for approving/committing/rejecting claims. Includes the **Vault Fallback Receiver admin panel**, **failed repayments logs**, and a list of active guardian requests with an **"object"** veto button.
+
+### Local Development
+To run the front-end dev server with hot-reload and proxy configuration pointing to port 3000:
+```bash
+npm run web
+```
+
+To build production static assets:
+```bash
+npm run web:build
+```
+
