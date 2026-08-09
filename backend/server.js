@@ -343,14 +343,14 @@ app.post("/api/claim", async (req, res) => {
       let gKey = guardianPrivateKey ? normalizePrivateKey(guardianPrivateKey) : null;
       if (!gKey) {
         const liveGuardian = await registry.guardianOf(att.personId);
-        const match = guardianKeyFor(liveGuardian);
+        const match = guardianKeyFor(liveGuardian, sessionOf(req));
         if (!match) {
           if (liveGuardian === ethers.ZeroAddress) {
             throw new Error(
               "No guardian is pinned for this identity. It was never registered, or the customerId is wrong."
             );
           }
-          const held = guardianKeys().map((k) => k.address).join(", ") || "(none held)";
+          const held = guardianKeys(sessionOf(req)).map((k) => k.address).join(", ") || "(none held)";
           throw new Error(
             `The live guardian is ${liveGuardian}, but this backend can only co-sign as ${held}. ` +
             `A claim must be co-signed by the CURRENT guardian — after a replacement the old key is ` +
@@ -414,9 +414,9 @@ app.post("/api/guardian-sign", async (req, res) => {
     let privKey = guardianPrivateKey ? normalizePrivateKey(guardianPrivateKey) : null;
     if (!privKey) {
       const liveGuardian = await registry.guardianOf(personIdOf(customerId));
-      const match = guardianKeyFor(liveGuardian);
+      const match = guardianKeyFor(liveGuardian, sessionOf(req));
       if (!match) {
-        const held = guardianKeys().map((k) => k.address).join(", ") || "(none held)";
+        const held = guardianKeys(sessionOf(req)).map((k) => k.address).join(", ") || "(none held)";
         throw new Error(
           `This backend can only co-sign as ${held}, but the live guardian is ${liveGuardian}. ` +
           `Pass guardianPrivateKey for the CURRENT guardian, or set DEMO_NEW_GUARDIAN_PK and redeploy.`
@@ -546,11 +546,12 @@ app.post("/api/advance/draw", async (req, res) => {
     // Deliberately not signed by the issuer key. The vault only accepts a draw
     // from the claim's own new wallet, so that nobody can saddle a claimant
     // with a loan and its fee without consent.
-    const signer = borrowerSigner();
+    const signer = borrowerSigner(sessionOf(req));
     if (!signer) {
       throw new Error(
         "No borrower key available. The advance must be drawn by the claim's new wallet — " +
-        "set DEMO_BORROWER_PK, or run the local demo where the wallets are disposable."
+        "set DEMO_BORROWER_PK, run a rotating demo session, or run the local demo where the " +
+        "wallets are disposable."
       );
     }
 
@@ -662,6 +663,83 @@ const localDemoWallets = LOCAL_MODE
   ? { A: demoAccount(5), B: demoAccount(6), X: demoAccount(7), G: demoAccount(8), G2: demoAccount(9) }
   : null;
 
+/* ---------------------------------------------------- rotating demo sessions
+ * A BindingRegistry binding is immutable — a wallet belongs to one person,
+ * ever, and revoked[] is never cleared. That is a deliberate property of the
+ * asset, not an oversight, so the same three addresses can only ever run the
+ * recovery story ONCE. Re-running it used to mean redeploying every contract
+ * and re-registering the token with Cleanverse.
+ *
+ * So a reset does not undo anything. It moves to a new person on new
+ * addresses, derived from DEMO_MNEMONIC at a session index the browser picks:
+ *
+ *     m/44'/60'/{session}'/0/{0..4}   ->   A, B, X, G, G2
+ *
+ * Three consequences worth knowing:
+ *
+ *   - It costs nothing. No demo wallet ever sends a transaction — the theft
+ *     beat is a staticcall, the advance is an EIP-712 authorisation the issuer
+ *     relays, and every state change is sent by the issuer or attestor. Fresh
+ *     addresses therefore need no gas, on any network.
+ *   - The backend stays stateless. The session is derived, not stored, so it
+ *     survives a restart and works across multiple backend instances.
+ *   - Two browsers can demo at once. Sessions differ in both wallets and
+ *     personId, and claims/advances/guardian requests are all keyed by one or
+ *     the other, so nothing collides.
+ *
+ * Session 0 means "the configured session" — the .env DEMO_WALLET_* addresses
+ * live, or Hardhat accounts 5-9 locally — which is exactly the behaviour that
+ * existed before sessions did.
+ */
+const DEMO_MNEMONIC = process.env.DEMO_MNEMONIC || (LOCAL_MODE ? HARDHAT_MNEMONIC : null);
+
+/** Hardened path components are capped at 2^31-1, so sessions are too. */
+const MAX_SESSION = 2 ** 31 - 1;
+
+/**
+ * Read a session index off a request. The browser sends it as a header on
+ * every call; ?session= is accepted too so the API stays usable from curl.
+ *
+ * A session index chooses a derivation path, so it is attacker-controlled
+ * input to key generation and is validated as strictly as one: an integer in
+ * range, or the configured session. Anything malformed is rejected rather than
+ * coerced, because coercing it silently would hand back a DIFFERENT person's
+ * wallets than the caller believes it is using.
+ */
+function sessionOf(req) {
+  const raw = req.get?.("X-Rebind-Session") ?? req.query?.session;
+  if (raw === undefined || raw === null || raw === "") return 0;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > MAX_SESSION) {
+    throw new Error(`Invalid demo session ${JSON.stringify(raw)}: expected an integer in 0..${MAX_SESSION}.`);
+  }
+  return n;
+}
+
+const sessionCache = new Map();
+
+/**
+ * The five wallets of a derived session, as signers.
+ *
+ * DEMO_MNEMONIC must be a phrase of its own and never the deployer's, or a
+ * caller could pick the session index whose path lands on an institutional
+ * address and ask this backend to act as it.
+ */
+function sessionWallets(session) {
+  if (!DEMO_MNEMONIC) {
+    throw new Error(
+      "Rotating demo sessions need DEMO_MNEMONIC set to a BIP-39 phrase of its own (not the " +
+      "deployer's). Set it, or use session 0 with DEMO_WALLET_A/B/X configured."
+    );
+  }
+  if (sessionCache.has(session)) return sessionCache.get(session);
+  const at = (i) =>
+    ethers.HDNodeWallet.fromPhrase(DEMO_MNEMONIC, undefined, `m/44'/60'/${session}'/0/${i}`);
+  const w = { A: at(0), B: at(1), X: at(2), G: at(3), G2: at(4) };
+  sessionCache.set(session, w);
+  return w;
+}
+
 /**
  * The address of whichever key guardianKey() will actually co-sign with.
  *
@@ -678,7 +756,48 @@ const guardianSignerAddress = (() => {
   try { return new ethers.Wallet(k).address; } catch { return null; }
 })();
 
-const DEMO_WALLETS = (() => {
+/**
+ * The configured session (session 0): .env addresses live, Hardhat accounts
+ * locally.
+ *
+ * This used to run at module scope and throw on a misconfiguration, which
+ * stopped the server booting. It cannot any more: a live deployment that only
+ * ever uses rotating sessions has no DEMO_WALLET_* to offer, and refusing to
+ * start over an unused session would take the whole demo down. The checks are
+ * unchanged, they just run on first use of session 0 and fail that request.
+ */
+let configuredWalletsMemo;
+const configuredWallets = () => (configuredWalletsMemo ??= buildConfiguredWallets());
+
+/** The wallets for a session: 0 is configured, anything else is derived. */
+function walletsFor(session) {
+  if (!session) return configuredWallets();
+  const w = sessionWallets(session);
+  const wallets = { A: w.A.address, B: w.B.address, X: w.X.address, G: w.G.address, G2: w.G2.address };
+
+  // The same collision check buildConfiguredWallets does for .env addresses.
+  // It should be unreachable — DEMO_MNEMONIC is supposed to be a phrase of its
+  // own — but the session index is chosen by the caller, so this is the one
+  // place a request could ask us to sign as an institution. Being unreachable
+  // is a reason to assert it, not to omit it.
+  const reserved = new Map([
+    [issuer.address.toLowerCase(), "issuer"],
+    [attestorWallet.address.toLowerCase(), "attestor"],
+    ...(D.vault ? [[D.vault.toLowerCase(), "vault"]] : []),
+  ]);
+  for (const [name, addr] of Object.entries(wallets)) {
+    const clash = reserved.get(addr.toLowerCase());
+    if (clash) {
+      throw new Error(
+        `Demo session ${session} derives wallet ${name} onto the ${clash} address (${addr}). ` +
+        `DEMO_MNEMONIC must be a phrase that shares no keys with the deployer or attestor.`
+      );
+    }
+  }
+  return wallets;
+}
+
+function buildConfiguredWallets() {
   // Local mode derives the wallets from the Hardhat mnemonic, so they are
   // pre-funded, disposable, and can never collide with anything else on the
   // fresh chain the deploy script writes to.
@@ -772,7 +891,7 @@ const DEMO_WALLETS = (() => {
   }
 
   return wallets;
-})();
+}
 
 /**
  * The guardian's signing key.
@@ -798,13 +917,22 @@ function guardianKey() {
  * from the Hardhat mnemonic; live mode takes them from GUARDIAN_PK and
  * DEMO_NEW_GUARDIAN_PK.
  */
-function guardianKeys() {
+function guardianKeys(session = 0) {
   const keys = [];
   const push = (pk, label) => {
     if (!pk) return;
     const privateKey = normalizePrivateKey(pk);
     keys.push({ label, privateKey, address: new ethers.Wallet(privateKey).address });
   };
+  // A rotating session brings its own guardian pair, and they lead: the
+  // registry pins THIS session's G at registration, so an env key from another
+  // session would only ever produce BadGuardianAttestation.
+  if (session) {
+    const w = sessionWallets(session);
+    keys.push({ label: `session ${session} wallet G`, privateKey: w.G.privateKey, address: w.G.address });
+    keys.push({ label: `session ${session} wallet G2`, privateKey: w.G2.privateKey, address: w.G2.address });
+    return keys;
+  }
   push(process.env.GUARDIAN_PK, "GUARDIAN_PK");
   push(process.env.DEMO_NEW_GUARDIAN_PK, "DEMO_NEW_GUARDIAN_PK");
   if (localDemoWallets) {
@@ -823,18 +951,26 @@ function guardianKeys() {
 }
 
 /** The held key whose address is the given live guardian, or null. */
-function guardianKeyFor(liveGuardian) {
+function guardianKeyFor(liveGuardian, session = 0) {
   if (!liveGuardian) return null;
   const want = liveGuardian.toLowerCase();
-  return guardianKeys().find((k) => k.address.toLowerCase() === want) || null;
+  return guardianKeys(session).find((k) => k.address.toLowerCase() === want) || null;
 }
 
-/** The signer that can draw an advance, or null if we hold no borrower key. */
-function borrowerSigner() {
+/**
+ * The signer that can draw an advance, or null if we hold no borrower key.
+ *
+ * On a rotating session this is never null: wallet B is derived, so the
+ * backend holds its key by construction. That closes a real gap — off a local
+ * chain the advance beat previously needed DEMO_BORROWER_PK pinned by hand to
+ * whatever DEMO_WALLET_B was, and was simply dead without it.
+ */
+function borrowerSigner(session = 0) {
+  if (session) return sessionWallets(session).B.connect(provider);
   if (process.env.DEMO_BORROWER_PK) {
     return new ethers.Wallet(normalizePrivateKey(process.env.DEMO_BORROWER_PK), provider);
   }
-  if (localDemoWallets && DEMO_WALLETS.B === localDemoWallets.B.address) {
+  if (localDemoWallets && configuredWallets().B === localDemoWallets.B.address) {
     return localDemoWallets.B.connect(provider);
   }
   return null;
@@ -866,11 +1002,11 @@ app.post("/api/guardian-replace/open", async (req, res) => {
        A real deployment has a third-party guardian signing on their own device
        and passing `guardianSignature` to /api/claim; that case is legitimate,
        so it can opt in with allowUnsignable. */
-    if (!allowUnsignable && newGuardian && !guardianKeyFor(newGuardian)) {
+    if (!allowUnsignable && newGuardian && !guardianKeyFor(newGuardian, sessionOf(req))) {
       throw new Error(
         `This backend holds no key for ${newGuardian}, so it could never co-sign a ` +
         `recovery claim for that guardian — every claim after this replacement would ` +
-        `fail. Choose one of: ${guardianKeys().map((k) => k.address).join(", ")}. ` +
+        `fail. Choose one of: ${guardianKeys(sessionOf(req)).map((k) => k.address).join(", ")}. ` +
         `Pass allowUnsignable:true only if the guardian will sign out of band.`
       );
     }
@@ -1030,8 +1166,15 @@ app.get("/api/guardian-replace/requests", async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-app.get("/api/config", (_req, res) => {
+app.get("/api/config", (req, res) => {
+  try {
+  const session = sessionOf(req);
+  const DEMO_WALLETS = walletsFor(session);
   ok(res, {
+    session,
+    // Whether this backend can hand out a fresh session at all. The UI hides
+    // its reset control rather than offering a button that can only fail.
+    canReset: DEMO_MNEMONIC !== null,
     wallets: DEMO_WALLETS,
     // The UI used to hardcode "30 seconds" in its copy, which silently lied
     // whenever CURE_WINDOW differed. Serve the deployed value instead.
@@ -1051,10 +1194,10 @@ app.get("/api/config", (_req, res) => {
       // generated wallet G while guardianKey() prefers GUARDIAN_PK, so a
       // single-key comparison reported "signature required" for a guardian the
       // backend could in fact sign for.
-      canCoSign: DEMO_WALLETS.G != null && guardianKeyFor(DEMO_WALLETS.G) !== null,
+      canCoSign: DEMO_WALLETS.G != null && guardianKeyFor(DEMO_WALLETS.G, session) !== null,
       // Every address this backend can actually co-sign as. After a guardian
       // replacement the claim flow uses whichever matches the CURRENT guardian.
-      keys: guardianKeys().map((k) => k.address),
+      keys: guardianKeys(session).map((k) => k.address),
     },
     advance: vault
       ? {
@@ -1068,10 +1211,74 @@ app.get("/api/config", (_req, res) => {
           // we hold that key only if DEMO_BORROWER_PK is set. Saying so here
           // lets the UI explain the gap instead of offering a button whose
           // only possible outcome is "No borrower key available".
-          canDraw: borrowerSigner() !== null,
+          canDraw: borrowerSigner(session) !== null,
         }
       : { enabled: false },
   });
+  } catch (e) { fail(res, e); }
+});
+
+/**
+ * Hand out a fresh demo session.
+ *
+ * There is nothing to tear down — see the note above sessionWallets. The new
+ * session's wallets have never been bound, so step 1 of the flow registers
+ * them normally, and the previous session's frozen wallet, spent claim and
+ * settled advance are simply left behind on-chain where they belong as
+ * history. The only thing that genuinely accumulates is vault liquidity, so
+ * this tops that up.
+ *
+ * The caller proposes the index rather than the server allocating one, which
+ * is what keeps concurrent demos independent and this backend stateless.
+ */
+app.post("/api/reset", async (req, res) => {
+  try {
+    const session = sessionOf(req);
+    if (!session) {
+      throw new Error(
+        "A reset needs a new session index. The browser picks one; a bare /api/reset with no " +
+        "X-Rebind-Session header would just re-select the configured wallets, which are already spent."
+      );
+    }
+    const wallets = walletsFor(session);
+
+    // Every draw takes stable out of the vault and puts NOTE in, permanently.
+    // Nothing in the flow ever puts the stable back, so enough sessions would
+    // eventually leave a vault that quotes an advance it cannot fund — the
+    // draw reverts mid-demo with nothing on screen explaining why. Top up
+    // before that, not after.
+    let toppedUp = null;
+    if (vault && stable) {
+      const decimals = Number(await stable.decimals());
+      const available = await vault.availableLiquidity();
+      const floor = ethers.parseUnits(process.env.ADVANCE_TOPUP_FLOOR || "5000", decimals);
+      if (available < floor) {
+        const amount = ethers.parseUnits(process.env.ADVANCE_TOPUP || "50000", decimals);
+        // Only a stablecoin we deployed can be minted. Against a real one the
+        // deployer has to hold the balance already, so say which it is.
+        if (typeof stable.mint === "function") {
+          try {
+            await (await stable.mint(issuer.address, amount)).wait();
+          } catch {
+            /* not ours to mint — fall through to the balance we hold */
+          }
+        }
+        const held = await stable.balanceOf(issuer.address);
+        if (held < amount) {
+          throw new Error(
+            `Vault liquidity is down to ${ethers.formatUnits(available, decimals)} and the issuer holds ` +
+            `only ${ethers.formatUnits(held, decimals)} to refill it with. Fund the issuer, or lower ` +
+            `ADVANCE_TOPUP.`
+          );
+        }
+        await (await stable.approve(D.vault, amount)).wait();
+        await (await vault.depositLiquidity(amount)).wait();
+        toppedUp = ethers.formatUnits(amount, decimals);
+      }
+    }
+
+    ok(res, { session, wallets, toppedUp });
+  } catch (e) { fail(res, e); }
 });
 
 // ---- state for the UI -------------------------------------------------------

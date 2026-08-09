@@ -10,6 +10,45 @@
 
 const BASE = "";
 
+/* ------------------------------------------------------------- demo session
+   A BindingRegistry binding is permanent, so the demo's three wallets can only
+   run the recovery story once. Resetting therefore does not undo anything: it
+   moves to a new person on new addresses, which the backend derives from a
+   session index this browser chooses.
+
+   Holding the index here rather than on the server is what lets two people run
+   the demo at the same time on one deployment without colliding — and it keeps
+   the backend stateless, so a restart does not strand a session.
+
+   Session 0 is the backend's configured wallets. We never ask for it: a fresh
+   browser gets a fresh session, so the first visit is already clean. */
+const SESSION_KEY = "rebind.session";
+
+function newSessionId() {
+  /* Hardened derivation paths cap at 2^31-1, and 0 means "configured". */
+  const [n] = crypto.getRandomValues(new Uint32Array(1));
+  return (n % 0x7ffffffe) + 1;
+}
+
+let session = (() => {
+  try {
+    const stored = Number(localStorage.getItem(SESSION_KEY));
+    if (Number.isInteger(stored) && stored > 0) return stored;
+  } catch { /* private mode */ }
+  const fresh = newSessionId();
+  try { localStorage.setItem(SESSION_KEY, String(fresh)); } catch { /* private mode */ }
+  return fresh;
+})();
+
+export const currentSession = () => session;
+
+/** Move to a brand-new session. The caller reloads config and state after. */
+export function rotateSession() {
+  session = newSessionId();
+  try { localStorage.setItem(SESSION_KEY, String(session)); } catch { /* private mode */ }
+  return session;
+}
+
 /* Connection state is global and observable — the nav pill and the offline
    banners all read from it rather than each running their own probe. */
 const listeners = new Set();
@@ -28,7 +67,13 @@ function setConn(online, detail){
 async function request(path, opts){
   let r;
   try{
-    r = await fetch(BASE + path, opts);
+    /* Every call carries the session, so nothing downstream has to remember to
+       thread it through. The backend reads it off the header and derives that
+       session's wallets and keys. */
+    r = await fetch(BASE + path, {
+      ...opts,
+      headers: { ...(opts?.headers || {}), "X-Rebind-Session": String(session) },
+    });
   }catch{
     setConn(false, "Nothing is listening on this port. Start the backend with `npm run server:local` for the offline demo, or `npm run server` against a testnet.");
     throw new Error("Backend unreachable — is the server running?");
@@ -61,6 +106,9 @@ export async function tryGet(path){
 
 export const api = {
   config:        ()                 => request("/api/config"),
+  /* Rotate first, so the reset call itself is made as the NEW session — that
+     is what the backend validates and tops the vault up for. */
+  reset:         ()                 => { rotateSession(); return post("/api/reset"); },
   state:         (wallets)          => request(`/api/state?wallets=${wallets.filter(Boolean).join(",")}`),
   claim:         (id)               => request(`/api/claim/${id}`),
 

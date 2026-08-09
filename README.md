@@ -209,7 +209,43 @@ Three things worth knowing:
 - **`npm run server:local` sets `DEMO_MODE=local` inline**, which needs a POSIX
   shell. On Windows use `set DEMO_MODE=local && node backend/server.js`.
 
-To reset, restart the node and re-run `fund:local` / `deploy:local`.
+### Running the demo more than once
+
+A `BindingRegistry` binding is permanent — a wallet belongs to one person, ever
+— so the same three wallets can run the recovery story exactly once. That used
+to make a second run a redeploy: `deploy:local`, restart the server, and on a
+public chain re-register the token with Cleanverse.
+
+**"Start over" in the UI does it without any of that.** It does not undo the
+previous run, because nothing on-chain can be undone; it issues a new identity
+on wallets that have never been bound, derived from `DEMO_MNEMONIC` at a
+session index the browser picks:
+
+```
+m/44'/60'/{session}'/0/{0..4}   ->   A, B, attacker, guardian, replacement guardian
+```
+
+Set `DEMO_MNEMONIC` to a BIP-39 phrase **of its own** — it must share no keys
+with `DEPLOYER_PK` or `ATTESTOR_PK`, since the session index comes from the
+request. Without it the button is hidden and the UI says why. Local mode falls
+back to the Hardhat phrase.
+
+It costs nothing on any network: no demo wallet ever sends a transaction. The
+blocked-transfer beat is a `staticcall`, the bridge advance is an EIP-712
+authorisation the issuer relays, and every state change is sent by the issuer
+or attestor — so fresh addresses never need gas.
+
+Two consequences worth knowing:
+
+- **Sessions are per-browser**, carried on an `X-Rebind-Session` header, so two
+  people can run the demo at once against one deployment without colliding.
+  The backend derives rather than stores them, so a restart strands nothing.
+- **Vault liquidity is the one thing that accumulates.** Every advance takes
+  stable out and returns NOTE, and nothing puts the stable back. A reset tops
+  the vault up when it falls below `ADVANCE_TOPUP_FLOOR`.
+
+To reset the chain itself rather than the demo — after a node restart, say —
+re-run `fund:local` / `deploy:local` as above.
 
 ### 4. Answer the open question first
 

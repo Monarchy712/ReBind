@@ -489,6 +489,22 @@ export default function Demo() {
             ms: 6000,
           });
           S.goTo("done");
+        } else if (action === "reset") {
+          log("issuing a fresh demo session…", "info");
+          const cfg = await S.resetDemo();
+          if (cfg.toppedUp)
+            log(`vault liquidity topped up · ${cfg.toppedUp} dUSDC`, "dim");
+          log(
+            "the contracts are untouched — this is a new identity on wallets that have never been bound.",
+            "dim",
+          );
+          log(`wallet A · ${short(cfg.wallets.A)}`, "ok");
+          log(`wallet B · ${short(cfg.wallets.B)}`, "ok");
+          toast("Fresh wallets, same contracts. Start from step one.", {
+            title: "Demo reset",
+            kind: "ok",
+          });
+          return; // resetDemo already refreshed state against the new session
         }
       } catch (e) {
         log("ERROR " + e.message, "err");
@@ -810,11 +826,28 @@ export default function Demo() {
         ) : null}
         <p className="hint">
           Reloading resumes this finished run rather than restarting it:
-          bindings are deliberately immutable, so wallet A cannot be
-          re-registered. A fresh run needs a redeploy —{" "}
-          <code className="codelet">npm run deploy:local</code>, then restart
-          the server.
+          bindings are deliberately immutable, so wallet A can never be
+          re-registered. Running it again therefore does not undo this one — it
+          issues a new identity on three wallets that have never been bound.
+          The contracts stay exactly as deployed.
         </p>
+        {S.canReset ? (
+          <div className="row">
+            <ActionButton
+              className="btn primary"
+              onAction={() => run("reset")}
+            >
+              Run the demo again
+            </ActionButton>
+          </div>
+        ) : (
+          <p className="hint">
+            This backend has no <code className="codelet">DEMO_MNEMONIC</code>{" "}
+            set, so it cannot issue a fresh session. A new run needs a redeploy
+            — <code className="codelet">npm run deploy:local</code>, then
+            restart the server.
+          </p>
+        )}
       </>
     );
   }, [S, run, remaining, totalWindow, windowElapsed]);
@@ -920,6 +953,21 @@ export default function Demo() {
 
         <Reveal delay={190}>
           <Rail beats={S.beats} beat={S.beat} titles={BEAT_TITLES} />
+          {/* Reachable at any beat, not only at the end. A run that reverts
+              halfway used to need a redeploy to try again, which is a bad
+              thing to discover while presenting. */}
+          {S.canReset && S.beat > 0 ? (
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button
+                className="btn sm"
+                disabled={S.resetting}
+                onClick={() => run("reset")}
+                title="Issues a new identity on never-bound wallets. The contracts stay deployed."
+              >
+                {S.resetting ? "resetting…" : "start over"}
+              </button>
+            </div>
+          ) : null}
         </Reveal>
 
         <Reveal className="panel pad stage" delay={230} innerRef={stageRef}>
