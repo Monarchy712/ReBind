@@ -71,13 +71,48 @@ h1,h2,h3{font-family:var(--display);font-weight:var(--display-weight);letter-spa
   70%{box-shadow:0 0 0 14px transparent}
   100%{box-shadow:0 0 0 0 transparent}
 }
-.btn.busy{color:transparent!important;pointer-events:none}
-.btn.busy::after{
-  content:"";position:absolute;top:50%;left:50%;width:13px;height:13px;margin:-7px 0 0 -7px;
-  border:1.5px solid color-mix(in srgb,var(--ink) 25%,transparent);
-  border-top-color:var(--ink);border-radius:50%;animation:spin .7s linear infinite;
+/* ---------------------------------------------------------- waiting state */
+/* A button that is dead for a known length of time fills up instead of just
+   greying out, so the wait reads as progress rather than as breakage. The
+   fill direction matches the hover fill's grammar — the surface arrives, then
+   the control is live. */
+.btn > .btxt{position:relative;z-index:1}
+.btn > .fill{
+  content:"";position:absolute;inset:0;z-index:0;
+  transform:scaleX(0);transform-origin:left center;
+  background:color-mix(in srgb,var(--ink) 13%,transparent);
+  /* Linear and one second long: it is redrawn every countdown tick, so any
+     easing would visibly stutter at each step boundary. */
+  transition:transform 1s linear;
 }
-@keyframes spin{to{transform:rotate(360deg)}}
+.btn.primary > .fill{background:color-mix(in srgb,var(--bone) 26%,transparent)}
+.btn.danger > .fill{background:color-mix(in srgb,var(--danger) 16%,transparent)}
+.btn.good > .fill{background:color-mix(in srgb,var(--good) 16%,transparent)}
+/* Lighter than :disabled's .35 — the bar has to stay readable, and this
+   control is not unavailable so much as not ready. */
+.btn.waiting:disabled{opacity:.72;cursor:progress}
+.btn.waiting{font-variant-numeric:tabular-nums}
+/* Unknown-length wait: sweep rather than fill, so it never implies a position
+   in a countdown that does not exist. */
+.btn.waiting.pending > .fill{
+  inset:0 auto 0 0;width:40%;transform:none;transition:none;
+  animation:btnsweep 1.5s var(--ease-io) infinite;
+}
+@keyframes btnsweep{
+  0%{transform:translateX(-100%)}
+  100%{transform:translateX(250%)}
+}
+@media (prefers-reduced-motion:reduce){
+  .btn > .fill{transition:none}
+  .btn.waiting.pending > .fill{animation:none;width:100%;opacity:.5}
+}
+
+/* A transaction in flight used to blank the label and spin a disc in the
+   middle, which read as "this button broke" rather than "this is working".
+   It now sweeps the same bar the gated states use, and keeps its label, so
+   every reason a button is unpressable looks like one thing. */
+.btn.busy{pointer-events:none}
+.btn.busy > .btxt{opacity:.6;transition:opacity var(--t) var(--ease)}
 /* Dark-band buttons invert. */
 .hero .btn,.on-dark .btn{color:var(--on-dark);border-color:var(--dark-line)}
 .hero .btn::before,.on-dark .btn::before{background:var(--on-dark)}
@@ -283,6 +318,10 @@ h1,h2,h3{font-family:var(--display);font-weight:var(--display-weight);letter-spa
 }
 .guardian .val{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);word-break:break-all}
 .guardian .why{font-size:12.5px;color:var(--muted);flex:1 1 300px;line-height:1.6}
+/* Same row grammar as the guardian, one step quieter: it is housekeeping for
+   the run, not part of the mechanism being demonstrated. */
+.runrow{background:transparent;border-style:dashed;padding-top:16px;padding-bottom:16px}
+.runrow .val{color:var(--muted)}
 
 /* =================================================================== rail */
 .rail{display:grid;gap:0 14px;margin:clamp(30px,5vw,52px) 0}

@@ -304,6 +304,63 @@ and "key compromised", which is narration — replay from the last provable step
 
 ---
 
+## Deploying it
+
+One web service. The Express backend serves the API *and* hands out the built
+React bundle, the frontend calls same-origin, and routing is hash-based — so
+there is no second deploy, no CORS between the halves, and no SPA rewrite rule.
+`render.yaml` is a Render blueprint that encodes all of it.
+
+**Render dashboard → New → Blueprint → pick this repo.** It reads the
+blueprint, then prompts for the eight secrets. That is the whole flow.
+
+### Two things that are easy to get wrong
+
+**`npm ci --include=dev`, not `npm ci`.** The build runs `hardhat compile` to
+regenerate `artifacts/`, which is gitignored and which the backend reads ABIs
+from at runtime. Hardhat is a devDependency, so a production-only install gives
+you a server that boots cleanly and then fails every single route.
+
+**`deployments.json` is committed on purpose.** The backend requires it for
+contract addresses and it cannot be regenerated without deploying, so a host
+building from a clean clone has to find it in the repo. It holds addresses and
+a chainId — never a key. Redeploying the contracts means committing the new
+file.
+
+### Secrets to set in the dashboard
+
+| Variable | What it is |
+|---|---|
+| `DEPLOYER_PK` | The issuer. Pays gas for every step of every run — keep it funded. |
+| `ATTESTOR_PK` | Signs the EIP-712 identity attestation. |
+| `GUARDIAN_PK` | Co-signs claims. Must be a different key from the attestor, or the fourth trust layer is theatre — the server refuses to start if they match. |
+| `DEMO_MNEMONIC` | Derives each run's wallets. A phrase of its own, sharing no keys with the two above. |
+| `IDENTITY_COMMITMENT_SALT` | Makes the on-chain `personId` unguessable from a customerId. |
+| `CV_API_ID` / `CV_API_KEY` | Cleanverse credentials. |
+| `RPC_URL` | A **keyed** Base Sepolia endpoint. |
+
+Use a keyed RPC provider rather than the public `https://sepolia.base.org`. It
+throttles under demo traffic and the symptom is not an error — it is a
+countdown that stops moving while the room watches.
+
+### What a public link exposes
+
+Every write endpoint is unauthenticated by design (the demo has no login) and
+every one of them spends the issuer's gas and a slice of the Cleanverse quota.
+Two things hold that down, both in `backend/server.js`:
+
+- **CORS** allows this service's own origin and localhost, nothing else. Set
+  `ALLOWED_ORIGINS` only if the page is ever hosted apart from the API.
+- **A per-IP rate limit** on non-GET requests — `RATE_MAX` actions per
+  `RATE_WINDOW_MS`, defaulting to 120 per 10 minutes, which is several full
+  runs. It is in-memory and per-instance: a courtesy that stops a bored visitor
+  from draining the faucet, not a security boundary.
+
+Watch the issuer's balance. Nothing in the app warns you when it runs dry; the
+demo simply starts failing at whichever step exhausts it.
+
+---
+
 ## The demo — under four minutes
 
 | # | Beat | What the room sees |

@@ -1,0 +1,66 @@
+# Render blueprint. One web service: the Express backend serves the API and
+# hands out the built React bundle from frontend/dist, so there is no second
+# deploy to keep in step and no CORS between them.
+#
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repo. Everything
+# below is applied automatically except the secrets, which Render will prompt
+# for because they are marked sync:false. Nothing secret lives in this file.
+services:
+  - type: web
+    name: rebind
+    runtime: node
+    plan: starter # not `free`: the free tier sleeps after 15 minutes idle and
+                  # cold-starts in ~30-60s, which is exactly when someone opens
+                  # the link you sent them.
+    region: oregon
+
+    # npm ci --include=dev is load-bearing. The build compiles the contracts to
+    # regenerate artifacts/ (gitignored, and the backend reads the ABIs from it
+    # at runtime), and hardhat is a devDependency — a production-only install
+    # produces a server that boots and then fails every route with a missing
+    # module.
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+
+    # Must not read the chain. See the note on /healthz in backend/server.js.
+    healthCheckPath: /healthz
+
+    envVars:
+      # ---- secrets: set these in the dashboard, never in the repo ----------
+      - key: DEPLOYER_PK # issuer. Pays gas for every step of every run.
+        sync: false
+      - key: ATTESTOR_PK # signs the EIP-712 identity attestation
+        sync: false
+      - key: GUARDIAN_PK # co-signs claims; must differ from ATTESTOR_PK
+        sync: false
+      - key: DEMO_MNEMONIC # derives each run's wallets; a phrase of its own
+        sync: false
+      - key: IDENTITY_COMMITMENT_SALT # makes the on-chain personId unguessable
+        sync: false
+      - key: CV_API_ID
+        sync: false
+      - key: CV_API_KEY
+        sync: false
+      # A keyed Base Sepolia endpoint. The public https://sepolia.base.org
+      # throttles under demo traffic, and the visible symptom is a countdown
+      # that stops moving mid-demo.
+      - key: RPC_URL
+        sync: false
+
+      # ---- configuration: safe to keep in the repo -------------------------
+      - key: NODE_VERSION
+        value: "20"
+      - key: CV_CHAIN
+        value: base
+      - key: BRIDGE_ADVANCE
+        value: "true"
+      # Whether update_status freezes one wallet or a whole customerId. Leave
+      # false unless `npm run freeze-test` says per-wallet; a wrong true here
+      # revokes the recovery destination along with the old wallet.
+      - key: CV_FREEZE_PER_WALLET
+        value: "false"
+      # Origins allowed to call the API cross-site. The frontend is same-origin
+      # so this can stay empty; set it only if the page is ever hosted apart
+      # from this service.
+      - key: ALLOWED_ORIGINS
+        value: ""

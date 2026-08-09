@@ -22,8 +22,96 @@ const normalizePrivateKey = (value) => value && (value.startsWith("0x") ? value 
 const D = require("../deployments.json"); // written by scripts/deploy.js
 
 const app = express();
-app.use(cors());
+
+/**
+ * Trust the platform's proxy for one hop.
+ *
+ * Render (and every comparable host) terminates TLS in front of this process,
+ * so req.ip is the proxy's address unless we say otherwise — which would put
+ * every visitor in the world into a single rate-limit bucket. One hop, not
+ * `true`: trusting the whole chain lets a caller forge X-Forwarded-For and
+ * pick their own bucket.
+ */
+app.set("trust proxy", 1);
+
+/**
+ * CORS.
+ *
+ * The frontend is served by this same process and calls same-origin, so it
+ * needs no CORS at all. A wildcard was fine while this only ran on localhost;
+ * on a public URL it means any page on the internet can drive the write
+ * endpoints below, every one of which spends the issuer's gas and a slice of
+ * the Cleanverse quota. Allow the deployed origin (and localhost for
+ * development) and nothing else.
+ */
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+app.use(cors({
+  origin(origin, cb) {
+    // No Origin header: same-origin navigation, curl, health checks.
+    if (!origin) return cb(null, true);
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(null, false);
+  },
+}));
 app.use(express.json());
+
+/**
+ * Liveness for the platform's health check.
+ *
+ * Deliberately does no work: it must not derive a session's keys, and it must
+ * not touch the RPC. A health check that reads the chain reports the demo as
+ * down whenever the public RPC is having a slow minute, and Render responds by
+ * restarting a process that was fine.
+ */
+app.get("/healthz", (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
+
+/**
+ * Rate limit, per IP, on the routes that cost something.
+ *
+ * Every write here is a transaction paid for by the issuer's key, or a call
+ * against a Cleanverse quota we do not control. On a public link that is a
+ * drainable resource belonging to a stranger, so the ceiling is set to a
+ * generous demo — several full runs — and no more.
+ *
+ * In memory on purpose. This is a single instance, the limit is a courtesy
+ * rather than a security boundary, and a Redis dependency for a demo would be
+ * more failure surface than the thing it protects.
+ */
+const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS || 10 * 60 * 1000);
+const RATE_MAX = Number(process.env.RATE_MAX || 120);
+const hits = new Map();
+
+setInterval(() => {
+  const cutoff = Date.now() - RATE_WINDOW_MS;
+  for (const [ip, times] of hits) {
+    const kept = times.filter((t) => t > cutoff);
+    if (kept.length) hits.set(ip, kept);
+    else hits.delete(ip);
+  }
+}, RATE_WINDOW_MS).unref();
+
+app.use((req, res, next) => {
+  if (req.method === "GET" || req.method === "OPTIONS") return next();
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const times = (hits.get(ip) || []).filter((t) => t > now - RATE_WINDOW_MS);
+  if (times.length >= RATE_MAX) {
+    const retryAfter = Math.ceil((times[0] + RATE_WINDOW_MS - now) / 1000);
+    res.set("Retry-After", String(retryAfter));
+    return res.status(429).json({
+      ok: false,
+      error:
+        `Too many actions from this address — ${RATE_MAX} in ${Math.round(RATE_WINDOW_MS / 60000)} minutes. ` +
+        `Every step of this demo is a real transaction paid for by the issuer, so the rate is capped. ` +
+        `Try again in ${retryAfter}s.`,
+    });
+  }
+  times.push(now);
+  hits.set(ip, times);
+  return next();
+});
 /* The frontend is a Vite/React app. In production it is a static bundle in
    frontend/dist, which this server hands out so `npm run server:local` still
    gives you the whole thing on one port. During development you would instead

@@ -1,0 +1,20 @@
+{
+  "network": "baseSepolia",
+  "chainId": 84532,
+  "registry": "0xC0f9D96f7A6b19f4e85ddDaC506D545933ceDd53",
+  "token": "0xFFF6EC4E44f05556687C930AB14729D5bD84eb54",
+  "queue": "0xcA6e8eFf27B8e7841c895c8156Cd2F409501c0F7",
+  "guardianQueue": "0x7D78365dEa4e48b5079Fa83e952D584cC6dBc414",
+  "executor": "0x8aE01CD3d3011da6251AF880C206a39CA3204469",
+  "stable": "0xAE2009D554A3032adfA3643Df4C57b205ab04fBe",
+  "oracle": "0xF635290137d578fCE95D48847D1731EcC328Fe2D",
+  "vault": "0x33f539cB67dcC4dF8dD4D93D71A40eB79c70f967",
+  "advanceLtvBps": 8000,
+  "advanceFeeBps": 50,
+  "attestor": "0x687dFEcC7eAaFA4DC28f72Bfb9cdB77cAe18a641",
+  "issuer": "0xa34118bD1A2A789A962A4471C59c3964fb716123",
+  "cureWindow": 30,
+  "local": false,
+  "newGuardian": "0x7260C91645E44C1a076FA202097375dCf7Ca7938",
+  "deployedAt": "2026-08-09T20:22:17.268Z"
+}
