@@ -14,7 +14,7 @@ import { Reveal } from "../components/Reveal.jsx";
 import { useToast } from "../components/Toasts.jsx";
 import { statusOf, useRebind } from "../store/RebindProvider.jsx";
 
-function Stat({ label, value, count }){
+function Stat({ label, value, count }) {
   const ref = useRef(null);
   useEffect(() => {
     if (count && ref.current) countTo(ref, Number(value) || 0);
@@ -22,23 +22,62 @@ function Stat({ label, value, count }){
   return (
     <div className="stat">
       <div className="k lbl br">{label}</div>
-      <div className="v" ref={ref}>{count ? undefined : value}</div>
+      <div className="v" ref={ref}>
+        {count ? undefined : value}
+      </div>
     </div>
   );
 }
 
-export default function Console(){
+export default function Console() {
   const S = useRebind();
   const toast = useToast();
-  const [rows, setRows] = useState(null);          // null = still loading
+  const [rows, setRows] = useState(null); // null = still loading
   const [loadedAt, setLoadedAt] = useState(0);
   const [now, setNow] = useState(() => Date.now());
+
+  const [fallbackReceiver, setFallbackReceiver] = useState("");
+  const [fallbackActive, setFallbackActive] = useState(false);
+  const [repaymentFailures, setRepaymentFailures] = useState([]);
+  const [guardianRequestsRaw, setGuardianRequestsRaw] = useState([]);
+  const [newFallbackAddress, setNewFallbackAddress] = useState("");
+
+  useEffect(() => {
+    if (fallbackReceiver) {
+      setNewFallbackAddress(fallbackReceiver);
+    }
+  }, [fallbackReceiver]);
 
   const load = useCallback(async () => {
     const st = await S.refreshState();
     const list = await S.refreshClaims(st?.claimCount);
     setRows(list);
     setLoadedAt(Date.now());
+
+    if (S.advance.enabled) {
+      try {
+        const fb = await api.vault.getFallbackReceiver();
+        setFallbackReceiver(fb.address);
+        setFallbackActive(fb.active);
+      } catch (err) {
+        console.warn("Could not load fallback receiver", err);
+      }
+
+      try {
+        const fails = await api.vault.getRepaymentFailures();
+        setRepaymentFailures(fails.failures || []);
+      } catch (err) {
+        console.warn("Could not load repayment failures", err);
+      }
+    }
+
+    try {
+      const reqs = await api.guardian.getRequests();
+      setGuardianRequestsRaw(reqs.requests || []);
+    } catch (err) {
+      console.warn("Could not load guardian requests", err);
+    }
+
     return list;
   }, [S]);
 
@@ -51,8 +90,12 @@ export default function Console(){
      is instant rate-limiting. A ref keeps the latest function without making
      it a trigger. */
   const loadRef = useRef(load);
-  useEffect(() => { loadRef.current = load; });
-  useEffect(() => { if (S.booted) loadRef.current(); }, [S.booted]);
+  useEffect(() => {
+    loadRef.current = load;
+  });
+  useEffect(() => {
+    if (S.booted) loadRef.current();
+  }, [S.booted]);
 
   /* Countdowns tick locally between polls: re-reading the chain once a second
      per row would hammer the RPC for information we can infer. The offset is
@@ -63,139 +106,480 @@ export default function Console(){
     return () => clearInterval(t);
   }, []);
 
-  const sinceLoad = loadedAt ? Math.max(0, Math.floor((now - loadedAt) / 1000)) : 0;
+  const sinceLoad = loadedAt
+    ? Math.max(0, Math.floor((now - loadedAt) / 1000))
+    : 0;
   const claims = (rows || []).map((c) => ({
     ...c,
-    timeRemaining: c.claim.executed || c.claim.cancelled
-      ? c.timeRemaining
-      : Math.max(0, c.timeRemaining - sinceLoad),
+    timeRemaining:
+      c.claim.executed || c.claim.cancelled
+        ? c.timeRemaining
+        : Math.max(0, c.timeRemaining - sinceLoad),
   }));
 
-  const settled  = claims.filter((c) => c.claim.executed).length;
+  const guardianRequests = (guardianRequestsRaw || []).map((r) => ({
+    ...r,
+    timeRemaining:
+      r.cancelled || r.finalized
+        ? r.timeRemaining
+        : Math.max(0, r.timeRemaining - sinceLoad),
+  }));
+
+  const settled = claims.filter((c) => c.claim.executed).length;
   const rejected = claims.filter((c) => c.claim.cancelled).length;
 
   const act = async (fn, label, id) => {
-    try{
+    try {
       const r = await fn();
-      toast(`Claim #${id} ${label}${r?.txHash ? ` · ${shortTx(r.txHash)}` : ""}`, {
-        title:label[0].toUpperCase() + label.slice(1), kind:"ok",
-      });
+      toast(
+        `Claim #${id} ${label}${r?.txHash ? ` · ${shortTx(r.txHash)}` : ""}`,
+        {
+          title: label[0].toUpperCase() + label.slice(1),
+          kind: "ok",
+        },
+      );
       await load();
-    }catch(e){
-      toast(e.message, { title:"Action failed", kind:"err", ms:7000 });
+    } catch (e) {
+      toast(e.message, { title: "Action failed", kind: "err", ms: 7000 });
     }
   };
 
   return (
     <div className="view page">
       <div className="wrap">
-        <div className="spread wrapflex" style={{ marginBottom:26 }}>
-          <div className="section-head" style={{ marginBottom:0 }}>
+        <div className="spread wrapflex" style={{ marginBottom: 26 }}>
+          <div className="section-head" style={{ marginBottom: 0 }}>
             <span className="kicker">02 · issuer console</span>
             <h2 className="display">
-              the recovery queue. <span className="fade">approve, commit, or refuse.</span>
+              the recovery queue.{" "}
+              <span className="fade">approve, commit, or refuse.</span>
             </h2>
             <p className="section-sub">
-              every claim the queue holds. approving is revocable until it is committed; rejecting
-              restores the old wallet and moves nothing.
+              every claim the queue holds. approving is revocable until it is
+              committed; rejecting restores the old wallet and moves nothing.
             </p>
           </div>
-          <div className="row" style={{ gap:10 }}>
+          <div className="row" style={{ gap: 10 }}>
             {S.localMode ? (
               <ActionButton
                 className="btn sm"
                 onAction={async () => {
-                  const r = await api.advanceTime(S.cureWindow ? S.cureWindow + 5 : 3600);
-                  if (r.advanced) toast(`Chain time advanced by ${r.advanced}s.`, { title:"Fast-forwarded", kind:"ok" });
-                  else toast(r.note || "This chain does not allow time travel.", { title:"Not available", kind:"warn" });
+                  const r = await api.advanceTime(
+                    S.cureWindow ? S.cureWindow + 5 : 3600,
+                  );
+                  if (r.advanced)
+                    toast(`Chain time advanced by ${r.advanced}s.`, {
+                      title: "Fast-forwarded",
+                      kind: "ok",
+                    });
+                  else
+                    toast(r.note || "This chain does not allow time travel.", {
+                      title: "Not available",
+                      kind: "warn",
+                    });
                   await load();
                 }}
-              >fast-forward window</ActionButton>
+              >
+                fast-forward window
+              </ActionButton>
             ) : null}
-            <ActionButton className="btn sm" onAction={load}>refresh</ActionButton>
+            <ActionButton className="btn sm" onAction={load}>
+              refresh
+            </ActionButton>
           </div>
         </div>
 
-        <OfflineBanner online={S.online} detail={S.connDetail} fallback="The console cannot read the queue." />
+        <OfflineBanner
+          online={S.online}
+          detail={S.connDetail}
+          fallback="The console cannot read the queue."
+        />
 
-        <Reveal className="stats" style={{ marginBottom:18 }}>
-          <Stat label="claims"    value={claims.length} count />
-          <Stat label="in review" value={claims.length - settled - rejected} count />
-          <Stat label="settled"   value={settled} count />
-          <Stat label="rejected"  value={rejected} count />
-          <Stat label="window"    value={humanWindow(S.cureWindow)} />
+        <Reveal className="stats" style={{ marginBottom: 18 }}>
+          <Stat label="claims" value={claims.length} count />
+          <Stat
+            label="in review"
+            value={claims.length - settled - rejected}
+            count
+          />
+          <Stat label="settled" value={settled} count />
+          <Stat label="rejected" value={rejected} count />
+          <Stat label="window" value={humanWindow(S.cureWindow)} />
         </Reveal>
 
         <Reveal className="panel" delay={80}>
           <div className="panel-head">
             <span className="lbl br">recovery queue</span>
             <span className="chip info">
-              {S.contracts ? `chain ${S.contracts.chainId}` : S.config ? `chain ${S.config.chainId}` : "—"}
+              {S.contracts
+                ? `chain ${S.contracts.chainId}`
+                : S.config
+                ? `chain ${S.config.chainId}`
+                : "—"}
             </span>
           </div>
           <div className="tablewrap">
             <table className="data">
               <thead>
                 <tr>
-                  <th>claim</th><th>from</th><th>to</th><th>status</th>
-                  <th>window</th><th style={{ textAlign:"right" }}>actions</th>
+                  <th>claim</th>
+                  <th>from</th>
+                  <th>to</th>
+                  <th>status</th>
+                  <th>window</th>
+                  <th style={{ textAlign: "right" }}>actions</th>
                 </tr>
               </thead>
               <tbody>
                 {rows === null ? (
-                  Array.from({ length:3 }).map((_, i) => (
-                    <tr key={i}>{Array.from({ length:6 }).map((__, j) => (
-                      <td key={j}><div className="skel" /></td>
-                    ))}</tr>
+                  Array.from({ length: 3 }).map((_, i) => (
+                    <tr key={i}>
+                      {Array.from({ length: 6 }).map((__, j) => (
+                        <td key={j}>
+                          <div className="skel" />
+                        </td>
+                      ))}
+                    </tr>
                   ))
                 ) : claims.length === 0 ? (
-                  <tr><td colSpan={6}>
-                    <div className="empty">
-                      <h4>no claims yet</h4>
-                      <p>The queue is empty. Open one from the recovery wizard, or run the scripted
-                         demo to create a claim against Alice&apos;s wallets.</p>
-                      <Link className="btn sm" to="/demo">run the demo</Link>
-                    </div>
-                  </td></tr>
-                ) : claims.map((c) => {
-                  const st = statusOf(c);
-                  const done = c.claim.executed || c.claim.cancelled;
-                  const elapsed = c.timeRemaining <= 0;
-                  return (
-                    <tr key={c.id}>
-                      <td className="id">#{c.id}</td>
-                      <td className="addr" title={c.claim.oldWallet}>{short(c.claim.oldWallet)}</td>
-                      <td className="addr" title={c.claim.newWallet}>{short(c.claim.newWallet)}</td>
-                      <td><span className={`chip ${st.kind}${st.key === "open" ? " live" : ""}`}>{st.label}</span></td>
-                      <td className="mono tnum">{done ? "—" : elapsed ? "elapsed" : clock(c.timeRemaining)}</td>
-                      <td>
-                        <div className="rowacts">
-                          {done ? <span className="chip">closed</span> : (
-                            <>
-                              {!c.claim.committed && S.advance.enabled ? (
-                                <ActionButton className="btn sm"
-                                  onAction={() => act(() => api.commit(c.id), "committed", c.id)}>commit</ActionButton>
-                              ) : null}
-                              {!c.claim.issuerApproved ? (
-                                <ActionButton className="btn good sm"
-                                  onAction={() => act(() => api.approve(c.id), "approved", c.id)}>approve</ActionButton>
-                              ) : null}
-                              <ActionButton
-                                className="btn primary sm"
-                                disabled={!(elapsed && c.claim.issuerApproved)}
-                                onAction={(e, node) => { once(node, "unlocked", 900); return act(() => api.execute(c.id), "settled", c.id); }}
-                              >execute</ActionButton>
-                              {!c.claim.committed ? (
-                                <ActionButton className="btn danger sm"
-                                  onAction={() => act(() => api.cancel(c.id), "rejected", c.id)}>reject</ActionButton>
-                              ) : null}
-                            </>
-                          )}
+                  <tr>
+                    <td colSpan={6}>
+                      <div className="empty">
+                        <h4>no claims yet</h4>
+                        <p>
+                          The queue is empty. Open one from the recovery wizard,
+                          or run the scripted demo to create a claim against
+                          Alice&apos;s wallets.
+                        </p>
+                        <Link className="btn sm" to="/demo">
+                          run the demo
+                        </Link>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  claims.map((c) => {
+                    const st = statusOf(c);
+                    const done = c.claim.executed || c.claim.cancelled;
+                    const elapsed = c.timeRemaining <= 0;
+                    return (
+                      <tr key={c.id}>
+                        <td className="id">#{c.id}</td>
+                        <td className="addr" title={c.claim.oldWallet}>
+                          {short(c.claim.oldWallet)}
+                        </td>
+                        <td className="addr" title={c.claim.newWallet}>
+                          {short(c.claim.newWallet)}
+                        </td>
+                        <td>
+                          <span
+                            className={`chip ${st.kind}${
+                              st.key === "open" ? " live" : ""
+                            }`}
+                          >
+                            {st.label}
+                          </span>
+                        </td>
+                        <td className="mono tnum">
+                          {done
+                            ? "—"
+                            : elapsed
+                            ? "elapsed"
+                            : clock(c.timeRemaining)}
+                        </td>
+                        <td>
+                          <div className="rowacts">
+                            {done ? (
+                              <span className="chip">closed</span>
+                            ) : (
+                              <>
+                                {!c.claim.committed && S.advance.enabled ? (
+                                  <ActionButton
+                                    className="btn sm"
+                                    onAction={() =>
+                                      act(
+                                        () => api.commit(c.id),
+                                        "committed",
+                                        c.id,
+                                      )
+                                    }
+                                  >
+                                    commit
+                                  </ActionButton>
+                                ) : null}
+                                {!c.claim.issuerApproved ? (
+                                  <ActionButton
+                                    className="btn good sm"
+                                    onAction={() =>
+                                      act(
+                                        () => api.approve(c.id),
+                                        "approved",
+                                        c.id,
+                                      )
+                                    }
+                                  >
+                                    approve
+                                  </ActionButton>
+                                ) : null}
+                                <ActionButton
+                                  className="btn primary sm"
+                                  disabled={
+                                    !(elapsed && c.claim.issuerApproved)
+                                  }
+                                  onAction={(e, node) => {
+                                    once(node, "unlocked", 900);
+                                    return act(
+                                      () => api.execute(c.id),
+                                      "settled",
+                                      c.id,
+                                    );
+                                  }}
+                                >
+                                  execute
+                                </ActionButton>
+                                {!c.claim.committed ? (
+                                  <ActionButton
+                                    className="btn danger sm"
+                                    onAction={() =>
+                                      act(
+                                        () => api.cancel(c.id),
+                                        "rejected",
+                                        c.id,
+                                      )
+                                    }
+                                  >
+                                    reject
+                                  </ActionButton>
+                                ) : null}
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Reveal>
+
+        {S.advance.enabled && (
+          <Reveal className="panel pad" delay={100} style={{ marginTop: 24 }}>
+            <div className="panel-head">
+              <span className="lbl br">vault fallback receiver</span>
+              <span className={`chip ${fallbackActive ? "ok" : "warn"}`}>
+                {fallbackActive ? "active & verified" : "inactive / unverified"}
+              </span>
+            </div>
+            <div style={{ marginTop: 14 }}>
+              <p
+                style={{
+                  color: "var(--muted)",
+                  fontSize: 14,
+                  marginBottom: 14,
+                }}
+              >
+                The fallback receiver receives repayments if the main vault
+                address is blocked or revoked on the registry. It must be bound
+                to an identity in the registry to receive NOTE transfers.
+              </p>
+              <div className="row" style={{ gap: 14, alignItems: "flex-end" }}>
+                <div className="field" style={{ margin: 0, flex: 1 }}>
+                  <label htmlFor="fallback-addr">Fallback Address</label>
+                  <input
+                    id="fallback-addr"
+                    type="text"
+                    value={newFallbackAddress}
+                    onChange={(e) => setNewFallbackAddress(e.target.value)}
+                    placeholder="0x..."
+                    spellCheck="false"
+                    autoComplete="off"
+                  />
+                </div>
+                <ActionButton
+                  className="btn primary"
+                  onAction={async () => {
+                    if (!newFallbackAddress) return;
+                    try {
+                      await api.vault.setFallbackReceiver(
+                        newFallbackAddress.trim(),
+                      );
+                      toast("Fallback receiver updated successfully.", {
+                        title: "Success",
+                        kind: "ok",
+                      });
+                      await load();
+                    } catch (e) {
+                      toast(e.message, { title: "Update failed", kind: "err" });
+                    }
+                  }}
+                >
+                  Update Receiver
+                </ActionButton>
+              </div>
+            </div>
+          </Reveal>
+        )}
+
+        {S.advance.enabled && (
+          <Reveal className="panel" delay={120} style={{ marginTop: 24 }}>
+            <div className="panel-head">
+              <span className="lbl br">failed repayments log</span>
+              <span className="chip bad">
+                {repaymentFailures.length} failed
+              </span>
+            </div>
+            <div className="tablewrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>claim</th>
+                    <th>amount owed</th>
+                    <th>tried receiver</th>
+                    <th>reason / tx</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {repaymentFailures.length === 0 ? (
+                    <tr>
+                      <td colSpan={4}>
+                        <div className="empty" style={{ padding: "20px 0" }}>
+                          <p style={{ margin: 0 }}>
+                            No failed repayments recorded.
+                          </p>
                         </div>
                       </td>
                     </tr>
-                  );
-                })}
+                  ) : (
+                    repaymentFailures.map((fail, i) => (
+                      <tr key={i}>
+                        <td className="id">#{fail.claimId}</td>
+                        <td className="mono">{fail.owedNote} NOTE</td>
+                        <td className="addr" title={fail.receiver}>
+                          {short(fail.receiver)}
+                        </td>
+                        <td style={{ fontSize: 13, color: "var(--muted)" }}>
+                          <div
+                            style={{ fontFamily: "var(--mono)", fontSize: 11 }}
+                          >
+                            {shortTx(fail.txHash)}
+                          </div>
+                          <div>{fail.reason}</div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </Reveal>
+        )}
+
+        <Reveal className="panel" delay={140} style={{ marginTop: 24 }}>
+          <div className="panel-head">
+            <span className="lbl br">pending guardian change requests</span>
+            <span className="chip info">
+              {
+                guardianRequests.filter((r) => !r.cancelled && !r.finalized)
+                  .length
+              }{" "}
+              active
+            </span>
+          </div>
+          <div className="tablewrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>request</th>
+                  <th>wallet</th>
+                  <th>old guardian</th>
+                  <th>new guardian</th>
+                  <th>status</th>
+                  <th>time remaining</th>
+                  <th style={{ textAlign: "right" }}>actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {guardianRequests.length === 0 ? (
+                  <tr>
+                    <td colSpan={7}>
+                      <div className="empty" style={{ padding: "20px 0" }}>
+                        <p style={{ margin: 0 }}>
+                          No guardian replacement requests found.
+                        </p>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  guardianRequests.map((req) => {
+                    const done = req.cancelled || req.finalized;
+                    const elapsed = req.timeRemaining <= 0;
+                    return (
+                      <tr key={req.requestId}>
+                        <td className="id">#{req.requestId}</td>
+                        <td className="addr" title={req.wallet}>
+                          {short(req.wallet)}
+                        </td>
+                        <td className="addr" title={req.oldGuardian}>
+                          {short(req.oldGuardian)}
+                        </td>
+                        <td className="addr" title={req.newGuardian}>
+                          {short(req.newGuardian)}
+                        </td>
+                        <td>
+                          {req.cancelled ? (
+                            <span className="chip bad">cancelled</span>
+                          ) : req.finalized ? (
+                            <span className="chip ok">finalized</span>
+                          ) : (
+                            <span className="chip info live">pending</span>
+                          )}
+                        </td>
+                        <td className="mono tnum">
+                          {done
+                            ? "—"
+                            : elapsed
+                            ? "elapsed"
+                            : clock(req.timeRemaining)}
+                        </td>
+                        <td>
+                          <div
+                            className="rowacts"
+                            style={{ justifyContent: "flex-end" }}
+                          >
+                            {!done ? (
+                              <ActionButton
+                                className="btn danger sm"
+                                onAction={async () => {
+                                  try {
+                                    await api.guardian.cancelRequest(
+                                      req.requestId,
+                                    );
+                                    toast(
+                                      `Request #${req.requestId} objected/cancelled.`,
+                                      { title: "Cancelled", kind: "ok" },
+                                    );
+                                    await load();
+                                  } catch (e) {
+                                    toast(e.message, {
+                                      title: "Object failed",
+                                      kind: "err",
+                                    });
+                                  }
+                                }}
+                              >
+                                Object
+                              </ActionButton>
+                            ) : (
+                              <span className="chip">closed</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>

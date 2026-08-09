@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "./BindingRegistry.sol";
+import "./GuardianReplacementQueue.sol";
 
 /**
  * @title RecoveryQueue
@@ -85,6 +86,8 @@ contract RecoveryQueue is EIP712, AccessControl {
 
     uint64 public cureWindow;
 
+    address public guardianReplacementQueue;
+
     struct Claim {
         bytes32 personId;
         address oldWallet;
@@ -132,6 +135,7 @@ contract RecoveryQueue is EIP712, AccessControl {
     event AttestorChanged(address indexed attestor);
     event CureWindowChanged(uint64 seconds_);
     event ExecutorSet(address indexed executor);
+    event GuardianReplacementQueueSet(address indexed queue);
 
     error BadAttestation(address recovered);
     error BadGuardianAttestation(address recovered);
@@ -148,6 +152,8 @@ contract RecoveryQueue is EIP712, AccessControl {
     error NoSuchClaim(uint256 claimId);
     error ZeroAddress();
     error ExecutorAlreadySet();
+    error GuardianChangePending(bytes32 personId);
+    error GuardianQueueAlreadySet();
 
     constructor(
         address registry_,
@@ -198,6 +204,13 @@ contract RecoveryQueue is EIP712, AccessControl {
         emit CureWindowChanged(seconds_);
     }
 
+    function setGuardianReplacementQueue(address queue_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (queue_ == address(0)) revert ZeroAddress();
+        if (guardianReplacementQueue != address(0)) revert GuardianQueueAlreadySet();
+        guardianReplacementQueue = queue_;
+        emit GuardianReplacementQueueSet(queue_);
+    }
+
     // -------------------------------------------------------------- claims
 
     /**
@@ -216,6 +229,12 @@ contract RecoveryQueue is EIP712, AccessControl {
         if (block.timestamp > deadline) revert AttestationExpired();
         if (oldWallet == newWallet) revert SameWallet(oldWallet);
         if (hasActiveClaim[oldWallet]) revert ClaimAlreadyActive(oldWallet, activeClaimOf[oldWallet]);
+
+        if (guardianReplacementQueue != address(0)) {
+            if (GuardianReplacementQueue(guardianReplacementQueue).hasActiveRequest(personId)) {
+                revert GuardianChangePending(personId);
+            }
+        }
 
         // Defence in depth: the registry must ALSO agree these are one person.
         if (!registry.samePerson(oldWallet, newWallet)) {

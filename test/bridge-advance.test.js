@@ -50,7 +50,7 @@ async function signGuardianClaim(guardian, queueAddr, chainId, { personId, oldWa
 }
 
 describe("Bridge advance", function () {
-  let admin, attestor, issuer, alice, aliceNew, outsider, guardian;
+  let admin, attestor, issuer, alice, aliceNew, outsider, guardian, fallback;
   let registry, token, queue, executor, vault, stable, oracle;
   let ALICE_ID, VAULT_ID, VAULT_GUARDIAN, chainId;
 
@@ -82,7 +82,7 @@ describe("Bridge advance", function () {
   };
 
   beforeEach(async function () {
-    [admin, attestor, issuer, alice, aliceNew, outsider, guardian] = await ethers.getSigners();
+    [admin, attestor, issuer, alice, aliceNew, outsider, guardian, fallback] = await ethers.getSigners();
     chainId = Number((await ethers.provider.getNetwork()).chainId);
 
     ALICE_ID = ethers.keccak256(ethers.toUtf8Bytes("ALICECUST0001"));
@@ -108,6 +108,7 @@ describe("Bridge advance", function () {
       await stable.getAddress(),
       await oracle.getAddress(),
       admin.address,
+      fallback.address,
       LTV_BPS,
       FEE_BPS
     );
@@ -338,7 +339,7 @@ describe("Bridge advance", function () {
     it("is bound to this vault, so a signature cannot be replayed elsewhere", async function () {
       const other = await (await ethers.getContractFactory("BridgeAdvanceVault")).deploy(
         await queue.getAddress(), await token.getAddress(), await stable.getAddress(),
-        await oracle.getAddress(), admin.address, LTV_BPS, FEE_BPS
+        await oracle.getAddress(), admin.address, fallback.address, LTV_BPS, FEE_BPS
       );
       const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
       const sig = await aliceNew.signTypedData(
@@ -450,6 +451,198 @@ describe("Bridge advance", function () {
         .to.be.revertedWithCustomError(vault, "OnlyExecutor");
       await expect(vault.connect(aliceNew).settle(id, note(4020)))
         .to.be.revertedWithCustomError(vault, "OnlyExecutor");
+    });
+
+    it("Vault's binding is revoked before execute() - fallback receiver succeeds", async function () {
+      // Revoke vault binding
+      await registry.connect(attestor).revokeWallet(await vault.getAddress(), "test revoke");
+      // Bind fallback so it is active
+      const fallbackId = ethers.keccak256(ethers.toUtf8Bytes("FALLBACK_ID"));
+      await registry.connect(attestor).bindWallet(fallbackId, fallback.address, admin.address);
+
+      // Execute recovery
+      await executor.execute(id);
+
+      // Assert fallback received the note and vault is marked repaid
+      expect(await token.balanceOf(fallback.address)).to.equal(note(4020));
+      expect(await token.balanceOf(await vault.getAddress())).to.equal(0);
+      expect((await vault.getAdvance(id)).repaid).to.equal(true);
+    });
+
+    it("Both vault and fallbackReceiver ineligible - defaults and pays borrower 100%", async function () {
+      // Revoke vault binding
+      await registry.connect(attestor).revokeWallet(await vault.getAddress(), "test revoke");
+      // fallback is not bound (default EOA is inactive on registry)
+
+      // Execute and assert events are emitted
+      await expect(executor.execute(id))
+        .to.emit(vault, "RepaymentFailed")
+        .withArgs(id, note(4020), "recovery transfer reverted for both vault and fallback receiver");
+
+      // Assert borrower received 100% of claim (5000 NOTE)
+      expect(await token.balanceOf(aliceNew.address)).to.equal(note(5000));
+      // Assert advance is defaulted, not repaid
+      const advState = await vault.getAdvance(id);
+      expect(advState.defaulted).to.equal(true);
+      expect(advState.repaid).to.equal(false);
+    });
+
+    it("setFallbackReceiver permissions and validation", async function () {
+      // only DEFAULT_ADMIN_ROLE can call
+      await expect(vault.connect(outsider).setFallbackReceiver(outsider.address))
+        .to.be.reverted;
+
+      // rejects address(0)
+      await expect(vault.connect(admin).setFallbackReceiver(ethers.ZeroAddress))
+        .to.be.revertedWithCustomError(vault, "ZeroAddress");
+
+      // emits FallbackReceiverChanged
+      await expect(vault.connect(admin).setFallbackReceiver(outsider.address))
+        .to.emit(vault, "FallbackReceiverChanged")
+        .withArgs(outsider.address);
+
+      // can be updated after advance is already drawn without affecting outcome until execution
+      // Restore fallback to a new receiver
+      await vault.connect(admin).setFallbackReceiver(fallback.address);
+      await registry.connect(attestor).revokeWallet(await vault.getAddress(), "test revoke");
+      const fallbackId = ethers.keccak256(ethers.toUtf8Bytes("FALLBACK_ID_2"));
+      await registry.connect(attestor).bindWallet(fallbackId, fallback.address, admin.address);
+
+      await executor.execute(id);
+      expect(await token.balanceOf(fallback.address)).to.equal(note(4020));
+    });
+
+    it("fallbackReceiver unset (address(0)) behaves like no fallback available", async function () {
+      // Deploy fresh contracts
+      const freshRegistry = await (await ethers.getContractFactory("BindingRegistry"))
+        .deploy(admin.address, attestor.address);
+      const freshToken = await (await ethers.getContractFactory("RebindableRWA"))
+        .deploy("Series A Note", "NOTE", NOTE_DEC, await freshRegistry.getAddress(), admin.address);
+      const freshQueue = await (await ethers.getContractFactory("RecoveryQueue"))
+        .deploy(await freshRegistry.getAddress(), attestor.address, admin.address, CURE);
+
+      const mockVault = await (await ethers.getContractFactory("MockVault")).deploy();
+      await mockVault.waitForDeployment();
+
+      // Deploy executor pointed to MockVault
+      const customExecutor = await (await ethers.getContractFactory("RebindExecutor")).deploy(
+        await freshQueue.getAddress(),
+        await freshToken.getAddress(),
+        await freshRegistry.getAddress(),
+        await mockVault.getAddress()
+      );
+
+      // Wire queue/token to customExecutor
+      await freshQueue.connect(admin).setExecutor(await customExecutor.getAddress());
+      await freshToken.connect(admin).setExecutor(await customExecutor.getAddress());
+      await freshRegistry.connect(admin).grantRole(await freshRegistry.RECOVERY_ROLE(), await freshQueue.getAddress());
+
+      // Bind alice and aliceNew
+      await freshRegistry.connect(attestor).bindWallet(ALICE_ID, alice.address, guardian.address);
+      await freshRegistry.connect(attestor).bindWallet(ALICE_ID, aliceNew.address, guardian.address);
+
+      // Mint to alice
+      await freshToken.connect(admin).mint(alice.address, note(5000));
+
+      // Open a claim
+      const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+      const payload = {
+        personId: ALICE_ID,
+        oldWallet: alice.address,
+        newWallet: aliceNew.address,
+        nonce: Number(await freshQueue.nonces(aliceNew.address)),
+        deadline,
+      };
+      const freshQueueAddr = await freshQueue.getAddress();
+      const sig = await signClaim(attestor, freshQueueAddr, chainId, payload);
+      const guardianSig = await signGuardianClaim(guardian, freshQueueAddr, chainId, payload);
+      await freshQueue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, guardianSig);
+      const claimId = Number(await freshQueue.claimCount()) - 1;
+
+      // Commit the claim
+      await freshQueue.connect(admin).grantRole(await freshQueue.ISSUER_ROLE(), issuer.address);
+      await freshQueue.connect(issuer).commit(claimId);
+
+      // Elapse window
+      await ethers.provider.send("evm_increaseTime", [CURE + 1]);
+      await ethers.provider.send("evm_mine", []);
+
+      // Execute claim - should emit AdvanceRepaymentFailed on customExecutor because mockVault is not bound and fallback is 0
+      await expect(customExecutor.execute(claimId))
+        .to.emit(customExecutor, "AdvanceRepaymentFailed")
+        .withArgs(claimId, note(4020));
+
+      expect(await mockVault.recordRepaymentFailureCalled()).to.equal(true);
+      expect(await freshToken.balanceOf(aliceNew.address)).to.equal(note(5000));
+    });
+
+    it("transfer succeeds, settle() fails - emits SettlementRecordingFailed", async function () {
+      // Deploy fresh contracts
+      const freshRegistry = await (await ethers.getContractFactory("BindingRegistry"))
+        .deploy(admin.address, attestor.address);
+      const freshToken = await (await ethers.getContractFactory("RebindableRWA"))
+        .deploy("Series A Note", "NOTE", NOTE_DEC, await freshRegistry.getAddress(), admin.address);
+      const freshQueue = await (await ethers.getContractFactory("RecoveryQueue"))
+        .deploy(await freshRegistry.getAddress(), attestor.address, admin.address, CURE);
+
+      const mockVault = await (await ethers.getContractFactory("MockVault")).deploy();
+      await mockVault.waitForDeployment();
+
+      // Bind mockVault so transfer to it succeeds
+      const mockVaultId = ethers.keccak256(ethers.toUtf8Bytes("MOCK_VAULT_ID"));
+      await freshRegistry.connect(attestor).bindWallet(mockVaultId, await mockVault.getAddress(), admin.address);
+
+      // Deploy executor pointed to MockVault
+      const customExecutor = await (await ethers.getContractFactory("RebindExecutor")).deploy(
+        await freshQueue.getAddress(),
+        await freshToken.getAddress(),
+        await freshRegistry.getAddress(),
+        await mockVault.getAddress()
+      );
+
+      // Wire queue/token to customExecutor
+      await freshQueue.connect(admin).setExecutor(await customExecutor.getAddress());
+      await freshToken.connect(admin).setExecutor(await customExecutor.getAddress());
+      await freshRegistry.connect(admin).grantRole(await freshRegistry.RECOVERY_ROLE(), await freshQueue.getAddress());
+
+      // Bind alice and aliceNew
+      await freshRegistry.connect(attestor).bindWallet(ALICE_ID, alice.address, guardian.address);
+      await freshRegistry.connect(attestor).bindWallet(ALICE_ID, aliceNew.address, guardian.address);
+
+      // Mint to alice
+      await freshToken.connect(admin).mint(alice.address, note(5000));
+
+      // Open a claim
+      const deadline = (await ethers.provider.getBlock("latest")).timestamp + 3600;
+      const payload = {
+        personId: ALICE_ID,
+        oldWallet: alice.address,
+        newWallet: aliceNew.address,
+        nonce: Number(await freshQueue.nonces(aliceNew.address)),
+        deadline,
+      };
+      const freshQueueAddr = await freshQueue.getAddress();
+      const sig = await signClaim(attestor, freshQueueAddr, chainId, payload);
+      const guardianSig = await signGuardianClaim(guardian, freshQueueAddr, chainId, payload);
+      await freshQueue.openClaim(ALICE_ID, alice.address, aliceNew.address, deadline, sig, guardianSig);
+      const claimId = Number(await freshQueue.claimCount()) - 1;
+
+      // Commit the claim
+      await freshQueue.connect(admin).grantRole(await freshQueue.ISSUER_ROLE(), issuer.address);
+      await freshQueue.connect(issuer).commit(claimId);
+
+      // Elapse window
+      await ethers.provider.send("evm_increaseTime", [CURE + 1]);
+      await ethers.provider.send("evm_mine", []);
+
+      // Execute claim - transfer succeeds (since mockVault is active) but mockVault.settle reverts, which should emit SettlementRecordingFailed
+      await expect(customExecutor.execute(claimId))
+        .to.emit(customExecutor, "SettlementRecordingFailed")
+        .withArgs(claimId, note(4020));
+
+      // Borrower still gets paid the remainder (Alice gets 980 NOTE because 4020 went to mockVault)
+      expect(await freshToken.balanceOf(aliceNew.address)).to.equal(note(980));
+      expect(await freshToken.balanceOf(await mockVault.getAddress())).to.equal(note(4020));
     });
   });
 

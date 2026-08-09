@@ -34,6 +34,17 @@ const EIP712_TYPES = {
   ],
 };
 
+const GUARDIAN_CHANGE_EIP712_TYPES = {
+  GuardianChangeRequest: [
+    { name: "personId", type: "bytes32" },
+    { name: "wallet", type: "address" },
+    { name: "oldGuardian", type: "address" },
+    { name: "newGuardian", type: "address" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+};
+
 const GUARDIAN_EIP712_TYPES = {
   GuardianRecoveryClaim: [
     { name: "personId", type: "bytes32" },
@@ -55,9 +66,10 @@ function personIdOf(customerId) {
 }
 
 class Attestor {
-  constructor({ privateKey, queueAddress, chainId }) {
+  constructor({ privateKey, queueAddress, guardianQueueAddress, chainId }) {
     this.signer = new ethers.Wallet(normalizePrivateKey(privateKey));
     this.queueAddress = queueAddress;
+    this.guardianQueueAddress = guardianQueueAddress;
     this.chainId = chainId;
   }
 
@@ -71,6 +83,15 @@ class Attestor {
       version: "1",
       chainId: this.chainId,
       verifyingContract: this.queueAddress,
+    };
+  }
+
+  guardianDomain() {
+    return {
+      name: "RebindGuardian",
+      version: "1",
+      chainId: this.chainId,
+      verifyingContract: this.guardianQueueAddress,
     };
   }
 
@@ -162,6 +183,44 @@ class Attestor {
 
     return { personId, oldWallet, newWallet, nonce, deadline, signature, guardian: guardianSigner.address };
   }
+
+  async signGuardianChange({ customerId, wallet, oldGuardian, newGuardian, nonce, ttlSeconds = 3600 }) {
+    if (newGuardian.toLowerCase() === wallet.toLowerCase()) {
+      throw new Error("Refusing to attest: newGuardian cannot be the wallet address itself");
+    }
+    if (newGuardian.toLowerCase() === oldGuardian.toLowerCase()) {
+      throw new Error("Refusing to attest: newGuardian cannot be the same as the old guardian");
+    }
+
+    // 1. queryApass({ address: wallet }) to check active/non-expired status
+    const apassRes = await cv.queryApass({ address: wallet });
+    if (String(apassRes.code) !== "0000" || !apassRes.data) {
+      throw new Error(`Refusing to attest: wallet does not have an A-Pass (${apassRes.message || "A-Pass not found"})`);
+    }
+    if (Number(apassRes.data.status) !== 1) {
+      throw new Error("Refusing to attest: wallet A-Pass is not active");
+    }
+    if (Number(apassRes.data.expirationTime) * 1000 < Date.now()) {
+      throw new Error("Refusing to attest: wallet A-Pass has expired");
+    }
+
+    // 2. walletsForCustomer(customerId) to confirm the wallet is linked to customerId
+    const wallets = await cv.walletsForCustomer(customerId);
+    if (!wallets.includes(wallet.toLowerCase())) {
+      throw new Error("Refusing to attest: wallet is not bound to this customerId");
+    }
+
+    const personId = personIdOf(customerId);
+    const deadline = Math.floor(Date.now() / 1000) + ttlSeconds;
+
+    const signature = await this.signer.signTypedData(
+      this.guardianDomain(),
+      GUARDIAN_CHANGE_EIP712_TYPES,
+      { personId, wallet, oldGuardian, newGuardian, nonce, deadline }
+    );
+
+    return { personId, wallet, oldGuardian, newGuardian, nonce, deadline, signature };
+  }
 }
 
 /**
@@ -185,5 +244,5 @@ async function signGuardianClaim({ privateKey, queueAddress, chainId, customerId
   return { personId, oldWallet, newWallet, nonce, deadline, signature, guardian: guardianSigner.address };
 }
 
-module.exports = { Attestor, personIdOf, EIP712_TYPES, GUARDIAN_EIP712_TYPES, signGuardianClaim };
+module.exports = { Attestor, personIdOf, EIP712_TYPES, GUARDIAN_EIP712_TYPES, GUARDIAN_CHANGE_EIP712_TYPES, signGuardianClaim };
 

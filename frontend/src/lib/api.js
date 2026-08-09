@@ -79,11 +79,22 @@ export const api = {
   /* Local dev node only. Against a real chain the backend reports advanced:0
      with a note, so callers must treat success as "maybe". */
   advanceTime:   (seconds)          => post("/api/advance-time", { seconds }),
+  vault: {
+    getFallbackReceiver: () => request("/api/vault/fallback-receiver"),
+    setFallbackReceiver: (address) => post("/api/vault/fallback-receiver", { address }),
+    getRepaymentFailures: () => request("/api/vault/repayment-failures"),
+  },
+  guardian: {
+    getRequests: () => request("/api/guardian-replace/requests"),
+    openRequest: (body) => post("/api/guardian-replace/open", body),
+    cancelRequest: (requestId) => post("/api/guardian-replace/cancel", { requestId }),
+    finalizeRequest: (requestId) => post("/api/guardian-replace/finalize", { requestId }),
+  },
 };
 
 /* Soft variants for polling paths, where a blip must not throw into a view. */
 export const safe = {
-  state:  (wallets) => tryGet(`/api/state?wallets=${wallets.filter(Boolean).join(",")}`),
+  state:  (wallets, customerId) => tryGet(`/api/state?wallets=${wallets.filter(Boolean).join(",")}${customerId ? `&customerId=${customerId}` : ""}`),
   claim:  (id)      => tryGet(`/api/claim/${id}`),
   advance:(id)      => tryGet(`/api/advance/${id}`),
 };
