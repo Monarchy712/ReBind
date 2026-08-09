@@ -648,8 +648,13 @@ const DEMO_WALLETS = (() => {
       G: process.env.DEMO_WALLET_G || localDemoWallets.G.address,
       // Replacement-guardian candidate generated at deploy time and bound to
       // the demo customerId by the register beat, so the guardian-replacement
-      // form can autofill a verified, non-colliding address.
-      G2: D.newGuardian || localDemoWallets.G2.address,
+      // form can autofill a verified, non-colliding address. An explicit
+      // DEMO_NEW_GUARDIAN_ADDRESS wins — it is the guardian the operator
+      // nominated, and pinning it must not require a redeploy.
+      G2:
+        process.env.DEMO_NEW_GUARDIAN_ADDRESS ||
+        D.newGuardian ||
+        localDemoWallets.G2.address,
     };
   }
 
@@ -675,8 +680,8 @@ const DEMO_WALLETS = (() => {
     X: process.env.DEMO_WALLET_X,
     G: process.env.DEMO_WALLET_G || guardianSignerAddress || null,
     // Replacement-guardian candidate generated at deploy time (see deploy.js).
-    // Null until a deployment that wrote newGuardian is used.
-    G2: D.newGuardian || null,
+    // DEMO_NEW_GUARDIAN_ADDRESS wins so pinning it never needs a redeploy.
+    G2: process.env.DEMO_NEW_GUARDIAN_ADDRESS || D.newGuardian || null,
   };
 
   // The deploy script binds the issuer (fallback receiver) and the vault as
@@ -762,6 +767,9 @@ function guardianKeys() {
   };
   push(process.env.GUARDIAN_PK, "GUARDIAN_PK");
   push(process.env.DEMO_NEW_GUARDIAN_PK, "DEMO_NEW_GUARDIAN_PK");
+  // When deploy.js generated the replacement guardian (no env override), the
+  // key is persisted in deployments.json so claims can co-sign as it too.
+  push(D.newGuardianPk, "deployment new-guardian key");
   if (localDemoWallets) {
     keys.push({
       label: "local wallet G",

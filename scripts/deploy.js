@@ -360,6 +360,7 @@ async function main() {
   // claims can co-sign as it after a replacement), otherwise generates a
   // disposable address. Set DEMO_NEW_GUARDIAN_ADDRESS to pin a specific one.
   let newGuardianAddr;
+  let newGuardianPk; // persisted when the backend must hold the generated key
   let newGuardianKeyed = false; // the backend holds this guardian's key and can co-sign as it
   if (process.env.DEMO_NEW_GUARDIAN_ADDRESS) {
     newGuardianAddr = address(process.env.DEMO_NEW_GUARDIAN_ADDRESS);
@@ -387,7 +388,15 @@ async function main() {
     // co-sign as this guardian after a replacement.
     newGuardianKeyed = true;
   } else {
-    newGuardianAddr = ethers.Wallet.createRandom().address;
+    // No env override: generate a disposable replacement guardian and PERSIST
+    // its key into deployments.json (gitignored) so the backend can co-sign as
+    // the new guardian once the replacement finalizes. Discarding it here is
+    // exactly the bug that made every claim fail with "can only co-sign as
+    // GUARDIAN_PK" after a replacement.
+    const _random = ethers.Wallet.createRandom();
+    newGuardianAddr = _random.address;
+    newGuardianPk = _random.privateKey;
+    newGuardianKeyed = true;
   }
   console.log(
     `  newGuardian  ${newGuardianAddr} (replacement guardian candidate${
@@ -418,6 +427,7 @@ async function main() {
     // deployments.json belonging to a different chain.
     local: isLocal,
     newGuardian: newGuardianAddr,
+    ...(newGuardianPk ? { newGuardianPk } : {}),
     deployedAt: new Date().toISOString(),
   };
 
