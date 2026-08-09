@@ -426,6 +426,12 @@ async function main() {
   const outPath = path.join(__dirname, "..", "deployments.json");
   fs.writeFileSync(outPath, JSON.stringify(out, null, 2));
   console.log(`\nWrote ${outPath}`);
+  // A fresh chain means fresh identities: drop the local Cleanverse stub's
+  // persisted bindings so they cannot outlive the registry that matched them.
+  try {
+    const store = path.join(__dirname, "..", ".cleanverse-local.json");
+    if (fs.existsSync(store)) { fs.unlinkSync(store); console.log("  cleared local Cleanverse stub"); }
+  } catch { /* nothing to clear */ }
 
   if (isLocal) {
     console.log(`

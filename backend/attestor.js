@@ -184,7 +184,7 @@ class Attestor {
     return { personId, oldWallet, newWallet, nonce, deadline, signature, guardian: guardianSigner.address };
   }
 
-  async signGuardianChange({ customerId, wallet, oldGuardian, newGuardian, nonce, ttlSeconds = 3600 }) {
+  async signGuardianChange({ customerId, wallet, oldGuardian, newGuardian, nonce, ttlSeconds = 3600 , deadline: givenDeadline }) {
     if (newGuardian.toLowerCase() === wallet.toLowerCase()) {
       throw new Error("Refusing to attest: newGuardian cannot be the wallet address itself");
     }
@@ -211,7 +211,11 @@ class Attestor {
     }
 
     const personId = personIdOf(customerId);
-    const deadline = Math.floor(Date.now() / 1000) + ttlSeconds;
+    // Callers anchor this to the chain clock; the local node's timestamp drifts
+    // ahead of real time every time the challenge window is fast-forwarded.
+    const deadline = givenDeadline !== undefined
+      ? givenDeadline
+      : Math.floor(Date.now() / 1000) + ttlSeconds;
 
     const signature = await this.signer.signTypedData(
       this.guardianDomain(),

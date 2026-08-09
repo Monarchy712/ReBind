@@ -155,6 +155,23 @@ let attestor;
   process.exit(1);
 });
 
+/**
+ * A deadline the CHAIN will accept, not one the wall clock agrees with.
+ *
+ * The local demo node fast-forwards time (evm_increaseTime) every time the
+ * challenge window is skipped, so its block timestamp drifts permanently ahead
+ * of real time — an hour or more after a few runs. A deadline computed from
+ * Date.now() is then already in the past on arrival, and the transaction
+ * reverts with AuthorizationExpired even though nothing is actually expired.
+ * Anchor to whichever clock is further ahead.
+ */
+async function chainDeadline(seconds) {
+  const now = Math.floor(Date.now() / 1000);
+  let blockTime = 0;
+  try { blockTime = Number((await provider.getBlock("latest"))?.timestamp || 0); } catch { /* fall back to wall clock */ }
+  return Math.max(now, blockTime) + seconds;
+}
+
 const ok = (res, data) => res.json({ ok: true, ...data });
 
 /**
@@ -542,7 +559,7 @@ app.post("/api/advance/draw", async (req, res) => {
     // Use the gasless path: the borrower signs, the issuer key relays. A wallet
     // in the middle of recovering an asset may well hold no gas, so this is the
     // realistic flow rather than a convenience.
-    const deadline = Math.floor(Date.now() / 1000) + 3600;
+    const deadline = await chainDeadline(3600);
     const nonce = await vault.advanceNonces(signer.address);
     const net = await provider.getNetwork();
     const authorization = await signer.signTypedData(
@@ -582,10 +599,19 @@ app.post("/api/execute", async (req, res) => {
     const id = Number(claimId);
     if (!await queue.isExecutable(id)) {
       const c = await queue.getClaim(id);
+      // Order matters. "executed" has to be tested before the window, or a
+      // second click on Recover reports "wait 0 more seconds" — a settled claim
+      // has no time remaining, so the window branch answers for it and hides
+      // the real reason.
+      if (c.executed) throw new Error("This claim has already been executed — the asset has moved.");
       if (c.cancelled) throw new Error("Claim was rejected during issuer review.");
       if (!c.issuerApproved) throw new Error("Claim still needs issuer approval.");
       const remaining = Number(await queue.timeRemaining(id));
-      throw new Error(`Challenge window is still active. Wait ${remaining} more second(s).`);
+      throw new Error(
+        remaining > 0
+          ? `Challenge window is still active. Wait ${remaining} more second(s).`
+          : "The claim is not executable yet — the chain has not registered the window as elapsed. Try again in a moment."
+      );
     }
     // Read the split before executing; afterwards the advance is settled and
     // repaymentDue() is 0, so the UI would have nothing to report.
@@ -828,15 +854,38 @@ app.get("/api/guardian-replace/config", async (req, res) => {
 app.post("/api/guardian-replace/open", async (req, res) => {
   if (!guardianQueue) return res.status(404).json({ ok: false, error: "No guardian queue deployed." });
   try {
-    const { customerId, wallet, oldGuardian, newGuardian } = req.body;
+    const { customerId, wallet, oldGuardian, newGuardian, allowUnsignable } = req.body;
+
+    /* Installing a guardian this backend holds no key for is a one-way door:
+       the replacement succeeds, and every later claim reverts with
+       BadGuardianAttestation because a claim must carry the CURRENT guardian's
+       co-signature. That is recoverable only by replacing the guardian again,
+       which is not obvious at the moment it breaks — so refuse here, where the
+       fix is cheap, rather than at claim time.
+
+       A real deployment has a third-party guardian signing on their own device
+       and passing `guardianSignature` to /api/claim; that case is legitimate,
+       so it can opt in with allowUnsignable. */
+    if (!allowUnsignable && newGuardian && !guardianKeyFor(newGuardian)) {
+      throw new Error(
+        `This backend holds no key for ${newGuardian}, so it could never co-sign a ` +
+        `recovery claim for that guardian — every claim after this replacement would ` +
+        `fail. Choose one of: ${guardianKeys().map((k) => k.address).join(", ")}. ` +
+        `Pass allowUnsignable:true only if the guardian will sign out of band.`
+      );
+    }
+
     const nonce = await guardianQueue.nonces(wallet);
 
+    // Same chain-clock drift as everywhere else: on the local node the block
+    // timestamp runs ahead of real time, so anchor the deadline to the chain.
     const att = await attestor.signGuardianChange({
       customerId,
       wallet,
       oldGuardian,
       newGuardian,
       nonce: Number(nonce),
+      deadline: await chainDeadline(86400),
     });
 
     const tx = await guardianQueue.openRequest(

@@ -8,3 +8,6 @@ rebind-handbook.pdf
 
 # Vite build output (regenerate with: npm run web:build)
 frontend/dist/
+
+# local Cleanverse stub state (cleared by npm run deploy:local)
+.cleanverse-local.json

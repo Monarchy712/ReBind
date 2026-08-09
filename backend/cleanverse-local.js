@@ -24,9 +24,39 @@
 
 const CHAIN = process.env.CV_CHAIN || "local";
 
-// address (lowercased) -> { customerId, chain, status, cvRecordId, expirationTime }
+/* address (lowercased) -> { customerId, chain, status, cvRecordId, expirationTime }
+
+   Persisted to disk between runs. On-chain bindings are deliberately
+   immutable, so if this map is lost while the chain still holds the binding
+   the identity becomes permanently unattestable: re-registering is refused by
+   the registry, and every claim fails with "wallet does not have an A-Pass".
+   Restarting the backend used to do exactly that and the only way out was a
+   redeploy. The file lives next to deployments.json and is keyed by nothing —
+   `npm run deploy:local` clears it, because a fresh chain means fresh
+   identities. */
+const fs = require("fs");
+const path = require("path");
+const STORE = path.join(__dirname, "..", ".cleanverse-local.json");
+
 const bindings = new Map();
 let recordSeq = 0;
+
+(function restore() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(STORE, "utf8"));
+    for (const [k, v] of Object.entries(raw.bindings || {})) bindings.set(k, v);
+    recordSeq = raw.recordSeq || 0;
+  } catch { /* no store yet, or unreadable — start empty */ }
+})();
+
+function persist() {
+  try {
+    fs.writeFileSync(STORE, JSON.stringify({
+      bindings: Object.fromEntries(bindings),
+      recordSeq,
+    }, null, 2));
+  } catch { /* a demo stub must never fail a request over its own cache */ }
+}
 
 function normaliseAddress(address) {
   if (typeof address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
@@ -66,6 +96,7 @@ async function generateApass({ customerId, address, chain = CHAIN, expirationTim
     cvRecordId,
     expirationTime: expirationTime || 1900000000,
   });
+  persist();
   return okResponse({ cvRecordId, customerId: String(customerId), walletAddress: key });
 }
 
@@ -75,6 +106,7 @@ async function updateStatus({ address, status }) {
   const rec = bindings.get(key);
   if (!rec) return { code: "0002", message: "A-Pass not found", data: null };
   rec.status = Number(status);
+  persist();
   return okResponse({ walletAddress: key, status: rec.status, txHash: null });
 }
 
