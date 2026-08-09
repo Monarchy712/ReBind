@@ -209,7 +209,43 @@ Three things worth knowing:
 - **`npm run server:local` sets `DEMO_MODE=local` inline**, which needs a POSIX
   shell. On Windows use `set DEMO_MODE=local && node backend/server.js`.
 
-To reset, restart the node and re-run `fund:local` / `deploy:local`.
+### Running the demo more than once
+
+A `BindingRegistry` binding is permanent — a wallet belongs to one person, ever
+— so the same three wallets can run the recovery story exactly once. That used
+to make a second run a redeploy: `deploy:local`, restart the server, and on a
+public chain re-register the token with Cleanverse.
+
+**"Start over" in the UI does it without any of that.** It does not undo the
+previous run, because nothing on-chain can be undone; it issues a new identity
+on wallets that have never been bound, derived from `DEMO_MNEMONIC` at a
+session index the browser picks:
+
+```
+m/44'/60'/{session}'/0/{0..4}   ->   A, B, attacker, guardian, replacement guardian
+```
+
+Set `DEMO_MNEMONIC` to a BIP-39 phrase **of its own** — it must share no keys
+with `DEPLOYER_PK` or `ATTESTOR_PK`, since the session index comes from the
+request. Without it the button is hidden and the UI says why. Local mode falls
+back to the Hardhat phrase.
+
+It costs nothing on any network: no demo wallet ever sends a transaction. The
+blocked-transfer beat is a `staticcall`, the bridge advance is an EIP-712
+authorisation the issuer relays, and every state change is sent by the issuer
+or attestor — so fresh addresses never need gas.
+
+Two consequences worth knowing:
+
+- **Sessions are per-browser**, carried on an `X-Rebind-Session` header, so two
+  people can run the demo at once against one deployment without colliding.
+  The backend derives rather than stores them, so a restart strands nothing.
+- **Vault liquidity is the one thing that accumulates.** Every advance takes
+  stable out and returns NOTE, and nothing puts the stable back. A reset tops
+  the vault up when it falls below `ADVANCE_TOPUP_FLOOR`.
+
+To reset the chain itself rather than the demo — after a node restart, say —
+re-run `fund:local` / `deploy:local` as above.
 
 ### 4. Answer the open question first
 
@@ -265,6 +301,63 @@ Reloading the page resumes from chain state rather than starting over, so a
 refresh mid-demo will not double-mint or lose your place. The two beats that
 leave no on-chain trace — the blocked transfer, which is a read-only preflight,
 and "key compromised", which is narration — replay from the last provable step.
+
+---
+
+## Deploying it
+
+One web service. The Express backend serves the API *and* hands out the built
+React bundle, the frontend calls same-origin, and routing is hash-based — so
+there is no second deploy, no CORS between the halves, and no SPA rewrite rule.
+`render.yaml` is a Render blueprint that encodes all of it.
+
+**Render dashboard → New → Blueprint → pick this repo.** It reads the
+blueprint, then prompts for the eight secrets. That is the whole flow.
+
+### Two things that are easy to get wrong
+
+**`npm ci --include=dev`, not `npm ci`.** The build runs `hardhat compile` to
+regenerate `artifacts/`, which is gitignored and which the backend reads ABIs
+from at runtime. Hardhat is a devDependency, so a production-only install gives
+you a server that boots cleanly and then fails every single route.
+
+**`deployments.json` is committed on purpose.** The backend requires it for
+contract addresses and it cannot be regenerated without deploying, so a host
+building from a clean clone has to find it in the repo. It holds addresses and
+a chainId — never a key. Redeploying the contracts means committing the new
+file.
+
+### Secrets to set in the dashboard
+
+| Variable | What it is |
+|---|---|
+| `DEPLOYER_PK` | The issuer. Pays gas for every step of every run — keep it funded. |
+| `ATTESTOR_PK` | Signs the EIP-712 identity attestation. |
+| `GUARDIAN_PK` | Co-signs claims. Must be a different key from the attestor, or the fourth trust layer is theatre — the server refuses to start if they match. |
+| `DEMO_MNEMONIC` | Derives each run's wallets. A phrase of its own, sharing no keys with the two above. |
+| `IDENTITY_COMMITMENT_SALT` | Makes the on-chain `personId` unguessable from a customerId. |
+| `CV_API_ID` / `CV_API_KEY` | Cleanverse credentials. |
+| `RPC_URL` | A **keyed** Base Sepolia endpoint. |
+
+Use a keyed RPC provider rather than the public `https://sepolia.base.org`. It
+throttles under demo traffic and the symptom is not an error — it is a
+countdown that stops moving while the room watches.
+
+### What a public link exposes
+
+Every write endpoint is unauthenticated by design (the demo has no login) and
+every one of them spends the issuer's gas and a slice of the Cleanverse quota.
+Two things hold that down, both in `backend/server.js`:
+
+- **CORS** allows this service's own origin and localhost, nothing else. Set
+  `ALLOWED_ORIGINS` only if the page is ever hosted apart from the API.
+- **A per-IP rate limit** on non-GET requests — `RATE_MAX` actions per
+  `RATE_WINDOW_MS`, defaulting to 120 per 10 minutes, which is several full
+  runs. It is in-memory and per-instance: a courtesy that stops a bored visitor
+  from draining the faucet, not a security boundary.
+
+Watch the issuer's balance. Nothing in the app warns you when it runs dry; the
+demo simply starts failing at whichever step exhausts it.
 
 ---
 

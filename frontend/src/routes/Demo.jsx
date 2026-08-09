@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, safe } from "../lib/api.js";
-import { humanWindow, num, short, shortTx, units } from "../lib/format.js";
+import { clock, humanWindow, num, short, shortTx, units } from "../lib/format.js";
 import { flyValue, once, REDUCED } from "../lib/motion.js";
 import {
   ActionButton,
@@ -178,6 +178,20 @@ export default function Demo() {
      In the vanilla build a re-render rebuilt it disabled and a one-shot flag
      stopped it ever re-enabling; here it simply cannot drift from the data. */
   const windowElapsed = remaining !== null && remaining <= 0;
+
+  /* How full the "unlocks when the window ends" buttons should be drawn.
+     Same fraction the ring uses, so the two never disagree on screen. Before
+     the first reading lands there is no fraction to show — "pending" sweeps
+     instead of claiming a position in a countdown we have not read yet. */
+  const windowProgress =
+    remaining === null
+      ? "pending"
+      : totalWindow
+        ? Math.min(1, Math.max(0, 1 - remaining / totalWindow))
+        : windowElapsed
+          ? 1
+          : "pending";
+  const unlocksIn = remaining !== null && remaining > 0 ? `unlocks in ${clock(remaining)}` : null;
 
   /* Re-sync with the chain when this route is entered, but only when the chain
      is demonstrably ahead of us.
@@ -489,6 +503,22 @@ export default function Demo() {
             ms: 6000,
           });
           S.goTo("done");
+        } else if (action === "reset") {
+          log("issuing a fresh demo session…", "info");
+          const cfg = await S.resetDemo();
+          if (cfg.toppedUp)
+            log(`vault liquidity topped up · ${cfg.toppedUp} dUSDC`, "dim");
+          log(
+            "the contracts are untouched — this is a new identity on wallets that have never been bound.",
+            "dim",
+          );
+          log(`wallet A · ${short(cfg.wallets.A)}`, "ok");
+          log(`wallet B · ${short(cfg.wallets.B)}`, "ok");
+          toast("Fresh wallets, same contracts. Start from step one.", {
+            title: "Demo reset",
+            kind: "ok",
+          });
+          return; // resetDemo already refreshed state against the new session
         }
       } catch (e) {
         log("ERROR " + e.message, "err");
@@ -659,7 +689,8 @@ export default function Demo() {
                 <>
                   <ActionButton
                     className="btn primary"
-                    disabled={!windowElapsed}
+                    progress={windowElapsed ? undefined : windowProgress}
+                    waitLabel={unlocksIn}
                     onAction={() => run("approve")}
                   >
                     Approve and recover A → B
@@ -667,7 +698,7 @@ export default function Demo() {
                   <div className={`hint${windowElapsed ? " good" : ""}`}>
                     {windowElapsed
                       ? "Window elapsed — the issuer may now approve and recover."
-                      : "Unlocks when the challenge window ends."}
+                      : "Nothing can move until the challenge window ends. The button fills as it runs down."}
                   </div>
                 </>
               )}
@@ -729,16 +760,20 @@ export default function Demo() {
                       at all. Say which, rather than failing on click. */}
                   <ActionButton
                     className="btn primary"
-                    disabled={
-                      !S.advance.canDraw || !(Number(q?.principalStable) > 0)
+                    disabled={!S.advance.canDraw}
+                    /* The quote is polled, not awaited, so there is no
+                       fraction to draw — sweep until it reads non-zero. */
+                    progress={
+                      S.advance.canDraw && !(Number(q?.principalStable) > 0)
+                        ? "pending"
+                        : undefined
                     }
+                    waitLabel="reading the vault quote…"
                     onAction={() => run("drawAdvance")}
                   >
-                    {!S.advance.canDraw
-                      ? "Advance unavailable"
-                      : Number(q?.principalStable) > 0
-                        ? `Draw ${q.principalStable} ${sym}`
-                        : "Reading the vault quote…"}
+                    {S.advance.canDraw
+                      ? `Draw ${q?.principalStable ?? ""} ${sym}`
+                      : "Advance unavailable"}
                   </ActionButton>
                   <div className="hint">
                     {S.advance.canDraw ? (
@@ -764,7 +799,8 @@ export default function Demo() {
               </p>
               <ActionButton
                 className="btn primary"
-                disabled={!windowElapsed}
+                progress={windowElapsed ? undefined : windowProgress}
+                waitLabel={unlocksIn}
                 onAction={() => run("approve")}
               >
                 Recover A → B
@@ -772,7 +808,7 @@ export default function Demo() {
               <div className={`hint${windowElapsed ? " good" : ""}`}>
                 {windowElapsed
                   ? "Window elapsed — the issuer may now approve and recover."
-                  : "Unlocks when the challenge window ends."}
+                  : "Nothing can move until the challenge window ends. The button fills as it runs down."}
               </div>
             </div>
           </div>
@@ -810,11 +846,30 @@ export default function Demo() {
         ) : null}
         <p className="hint">
           Reloading resumes this finished run rather than restarting it:
-          bindings are deliberately immutable, so wallet A cannot be
-          re-registered. A fresh run needs a redeploy —{" "}
-          <code className="codelet">npm run deploy:local</code>, then restart
-          the server.
+          bindings are deliberately immutable, so wallet A can never be
+          re-registered. Running it again therefore does not undo this one — it
+          issues a new identity on three wallets that have never been bound.
+          The contracts stay exactly as deployed.
         </p>
+        {S.canReset ? (
+          <div className="row" style={{ marginTop: 22 }}>
+            <ActionButton
+              className="btn primary"
+              progress={S.resetting ? "pending" : undefined}
+              waitLabel="issuing a fresh session…"
+              onAction={() => run("reset")}
+            >
+              Run the demo again
+            </ActionButton>
+          </div>
+        ) : (
+          <p className="hint">
+            This backend has no <code className="codelet">DEMO_MNEMONIC</code>{" "}
+            set, so it cannot issue a fresh session. A new run needs a redeploy
+            — <code className="codelet">npm run deploy:local</code>, then
+            restart the server.
+          </p>
+        )}
       </>
     );
   }, [S, run, remaining, totalWindow, windowElapsed]);
@@ -914,6 +969,30 @@ export default function Demo() {
               Nominated at registration and pinned to the identity. Must co-sign
               any recovery claim under its own EIP-712 type, so a compromised
               attestor key is not enough on its own.
+            </span>
+          </Reveal>
+        ) : null}
+
+        {/* Sits with the guardian row rather than floating under the rail:
+            both are context about this run rather than part of the story, and
+            the reset is reachable at any beat — a run that reverts halfway
+            used to need a redeploy, which is a bad thing to discover while
+            presenting. */}
+        {S.canReset ? (
+          <Reveal className="guardian runrow" delay={170}>
+            <span className="lbl br">run</span>
+            <span className="val">{S.customerId || "—"}</span>
+            <button
+              className="btn sm"
+              disabled={S.beat === 0 || S.resetting}
+              onClick={() => run("reset")}
+            >
+              {S.resetting ? "starting over…" : "start over"}
+            </button>
+            <span className="why">
+              Bindings are permanent, so this does not rewind the run — it
+              issues a new identity on wallets that have never been bound. The
+              contracts stay deployed.
             </span>
           </Reveal>
         ) : null}

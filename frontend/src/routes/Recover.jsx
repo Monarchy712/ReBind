@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, safe } from "../lib/api.js";
-import { humanWindow, short, shortTx } from "../lib/format.js";
+import { clock, humanWindow, short, shortTx } from "../lib/format.js";
 import { ActionButton, OfflineBanner, Ring } from "../components/Bits.jsx";
 import { Reveal } from "../components/Reveal.jsx";
 import { useToast } from "../components/Toasts.jsx";
@@ -202,29 +202,38 @@ export default function Recover() {
         </div>
 
         <div className="row" style={{ gap: 10 }}>
-          {elapsed ? (
-            <ActionButton
-              className="btn good"
-              onAction={async () => {
-                try {
-                  await api.guardian.finalizeRequest(req.requestId);
-                  toast("Guardian replaced successfully!", {
-                    title: "Success",
-                    kind: "ok",
-                  });
-                  await S.refreshState();
-                } catch (e) {
-                  toast(e.message, { title: "Finalize failed", kind: "err" });
-                }
-              }}
-            >
-              Finalize Guardian Change
-            </ActionButton>
-          ) : (
-            <button className="btn" disabled>
-              Waiting for cure window...
-            </button>
-          )}
+          {/* One control that fills as the window runs down, rather than a
+              dead button swapped out for a live one — the swap told you
+              nothing about how much of the wait was left. */}
+          <ActionButton
+            className="btn good"
+            progress={
+              elapsed
+                ? undefined
+                : S.cureWindow
+                  ? 1 - req.timeRemaining / S.cureWindow
+                  : "pending"
+            }
+            waitLabel={
+              req.timeRemaining > 0
+                ? `unlocks in ${clock(req.timeRemaining)}`
+                : "waiting for the cure window…"
+            }
+            onAction={async () => {
+              try {
+                await api.guardian.finalizeRequest(req.requestId);
+                toast("Guardian replaced successfully!", {
+                  title: "Success",
+                  kind: "ok",
+                });
+                await S.refreshState();
+              } catch (e) {
+                toast(e.message, { title: "Finalize failed", kind: "err" });
+              }
+            }}
+          >
+            Finalize Guardian Change
+          </ActionButton>
           <button className="btn" onClick={() => setSubMode("claim")}>
             Return to Recovery
           </button>
@@ -294,29 +303,38 @@ export default function Recover() {
         </div>
 
         <div className="row" style={{ gap: 10 }}>
-          {elapsed ? (
-            <ActionButton
-              className="btn good"
-              onAction={async () => {
-                try {
-                  await api.guardian.finalizeRequest(req.requestId);
-                  toast("Guardian replaced successfully!", {
-                    title: "Success",
-                    kind: "ok",
-                  });
-                  await S.refreshState();
-                } catch (e) {
-                  toast(e.message, { title: "Finalize failed", kind: "err" });
-                }
-              }}
-            >
-              Finalize Guardian Change
-            </ActionButton>
-          ) : (
-            <button className="btn" disabled>
-              Waiting for cure window...
-            </button>
-          )}
+          {/* One control that fills as the window runs down, rather than a
+              dead button swapped out for a live one — the swap told you
+              nothing about how much of the wait was left. */}
+          <ActionButton
+            className="btn good"
+            progress={
+              elapsed
+                ? undefined
+                : S.cureWindow
+                  ? 1 - req.timeRemaining / S.cureWindow
+                  : "pending"
+            }
+            waitLabel={
+              req.timeRemaining > 0
+                ? `unlocks in ${clock(req.timeRemaining)}`
+                : "waiting for the cure window…"
+            }
+            onAction={async () => {
+              try {
+                await api.guardian.finalizeRequest(req.requestId);
+                toast("Guardian replaced successfully!", {
+                  title: "Success",
+                  kind: "ok",
+                });
+                await S.refreshState();
+              } catch (e) {
+                toast(e.message, { title: "Finalize failed", kind: "err" });
+              }
+            }}
+          >
+            Finalize Guardian Change
+          </ActionButton>
         </div>
       </>
     );

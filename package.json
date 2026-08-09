@@ -4,6 +4,8 @@
   "description": "Recovery infrastructure for compliance-restricted RWAs",
   "main": "deck.js",
   "scripts": {
+    "start": "node backend/server.js",
+    "build": "npm run compile && npm run web:install && npm run web:build",
     "compile": "hardhat compile",
     "compile:offline": "node scripts/compile-local.js",
     "test": "hardhat test",
@@ -23,6 +25,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "hardhat": "^2.29.0",

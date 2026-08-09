@@ -52,8 +52,11 @@ export const buildBeats = (advanceEnabled) =>
    against the identity A and B were registered under, and a fresh id would
    make the attestor correctly refuse to attest. Keyed by token address so a
    redeploy starts a clean session. */
-function sessionCustomerId(token) {
-  const key = "rebind.cid." + token;
+function sessionCustomerId(token, session) {
+  /* Keyed by session as well as token: a reset moves to a new person, and
+     reusing the old customerId would ask the attestor to prove that the new
+     wallets belong to an identity they were never bound to. */
+  const key = `rebind.cid.${token}.${session}`;
   let v = null;
   try {
     v = localStorage.getItem(key);
@@ -106,8 +109,9 @@ export function RebindProvider({ children }) {
   const [adv, setAdv] = useState(null);
 
   const customerId = useMemo(
-    () => (config?.token ? sessionCustomerId(config.token) : null),
-    [config?.token],
+    () =>
+      config?.token ? sessionCustomerId(config.token, config.session ?? 0) : null,
+    [config?.token, config?.session],
   );
   const wallets = config?.wallets || {};
   const guardian = config?.guardian || { address: null, canCoSign: false };
@@ -219,10 +223,28 @@ export function RebindProvider({ children }) {
       const seq = buildBeats(c.advance?.enabled);
       const jump = (id) => setBeat(Math.max(0, seq.indexOf(id)));
 
-      if (st.claimCount > 0) {
-        const id = st.claimCount - 1;
-        const cl = await safe.claim(id);
-        if (cl) {
+      /* claimCount is global to the contract, not to this session. Taking the
+         newest claim outright would resume a freshly reset session onto the
+         PREVIOUS session's finished recovery — landing on "done" with three
+         empty wallets. Walk back to the newest claim that is actually about
+         this session's wallet A, bounded so a long-lived deployment cannot
+         turn a page load into hundreds of RPC reads. */
+      const findOwnClaim = async () => {
+        const from = st.claimCount - 1;
+        const stopAt = Math.max(0, from - 49);
+        for (let id = from; id >= stopAt; id--) {
+          const cl = await safe.claim(id);
+          if (cl && w.A && cl.claim.oldWallet?.toLowerCase() === w.A.toLowerCase()) {
+            return { id, cl };
+          }
+        }
+        return null;
+      };
+
+      const own = st.claimCount > 0 ? await findOwnClaim() : null;
+      if (own) {
+        const { id, cl } = own;
+        {
           setClaimId(id);
 
           if (cl.claim.executed) {
@@ -272,6 +294,47 @@ export function RebindProvider({ children }) {
     },
     [config],
   );
+
+  /* ------------------------------------------------------------- reset */
+  /**
+   * Start the whole story again, without redeploying anything.
+   *
+   * Nothing on-chain is undone, because nothing can be: a binding is
+   * permanent and a spent claim stays spent. Instead the backend hands us a
+   * new person on wallets that have never been bound, and the flow runs from
+   * the beginning against those. The contracts, and the token's Cleanverse
+   * registration, are untouched — so this costs no deploy and no gas.
+   *
+   * The old session's frozen wallet and settled claim stay on-chain as
+   * history, which is honest: the console can still show them.
+   */
+  const [resetting, setResetting] = useState(false);
+  const resetDemo = useCallback(async () => {
+    setResetting(true);
+    try {
+      const r = await api.reset();
+      const cfg = await api.config();
+
+      /* Clear the narrative state before the new config lands, so no render
+         can pair the previous run's claim with the new session's wallets. */
+      setClaimId(null);
+      setRejected(false);
+      setRecovered(false);
+      setLastSplit(null);
+      setAdv(null);
+      setClaims([]);
+      setBalances({});
+      setBeat(0);
+
+      setConfig(cfg);
+      await resume(cfg);
+      /* toppedUp belongs to the reset, not the config, but the caller wants
+         one object to report from. */
+      return { ...cfg, toppedUp: r.toppedUp };
+    } finally {
+      setResetting(false);
+    }
+  }, [resume]);
 
   /* -------------------------------------------------------------- boot */
   useEffect(() => {
@@ -365,6 +428,10 @@ export function RebindProvider({ children }) {
       adv,
       setAdv,
       resume,
+      // reset
+      canReset: !!config?.canReset,
+      resetting,
+      resetDemo,
     }),
     [
       config,
@@ -396,6 +463,8 @@ export function RebindProvider({ children }) {
       recovered,
       lastSplit,
       adv,
+      resetting,
+      resetDemo,
       resume,
     ],
   );

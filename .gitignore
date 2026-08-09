@@ -2,7 +2,10 @@ node_modules/
 .env
 artifacts/
 cache/
-deployments.json
+# deployments.json is deliberately NOT ignored. The backend requires it at
+# runtime for contract addresses, and it cannot be regenerated without
+# deploying — so a host building from a clean clone has to find it in the repo
+# or fail at boot. It holds addresses and a chainId, never a key.
 *.log
 rebind-handbook.pdf
 
